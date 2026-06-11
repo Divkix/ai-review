@@ -29,7 +29,7 @@ Run `git diff $LAST_SHA...$HEAD_SHA`. Use `git diff origin/$GITHUB_BASE_REF...HE
 
 ## Step 2 — Reconcile prior findings
 
-Parse `PRIOR_STATE_JSON`. First fetch the PR's live review threads via GraphQL — stored `threadId`s can be stale (force-pushes may delete and re-create thread nodes), so always match prior findings against the live list: by `threadId` when it appears there, otherwise by path + fingerprint/body:
+Parse `PRIOR_STATE_JSON`. First fetch the PR's live review threads via GraphQL — stored `threadId`s can be stale (force-pushes may delete and re-create thread nodes), so always match prior findings against the live list: by `threadId` when it appears there, otherwise by path + fingerprint/body. Also sweep live unresolved bot-authored threads that are missing from the state (earlier runs may have dropped findings whose resolution silently failed) — treat them as prior findings too:
 
 ```
 gh api graphql -f query='
@@ -50,7 +50,7 @@ gh api graphql -f query='
 
   If no thread matches, skip the resolution step for that finding but still count it as resolved/unresolved. Skip threads where `isResolved` is already true.
 - Check whether the new commits fix it (inspect the file at HEAD and the incremental diff).
-- **Fixed** → resolve its review thread via GraphQL:
+- **Fixed** → resolve its review thread via GraphQL and **verify the response says `"isResolved": true`** (an error or null means it is NOT resolved — keep the finding in the state):
 
 ```
 gh api graphql -f query='

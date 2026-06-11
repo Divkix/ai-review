@@ -101,10 +101,10 @@ Include in the body any dropped CRITICAL/HIGH static findings with reasoning (St
 
 ### Reconcile a prior review (re-reviews)
 
-A full review can run on a PR that was already reviewed (force-push, `/review full`). If env `PRIOR_STATE_JSON` is set, after posting your review:
+A full review can run on a PR that was already reviewed (force-push, `/review full`). After posting your review:
 
-- First fetch the PR's live review threads via GraphQL (same query as Step 6a). Stored `threadId`s can go stale — a force-push may delete and re-create thread nodes — so match each prior finding to a live thread by `threadId` if it appears in the live list, otherwise by path + fingerprint/body. Skip threads already `isResolved`.
-- For each prior finding that is now fixed at HEAD, resolve its matched live thread via GraphQL:
+- Fetch the PR's live review threads via GraphQL (same query as Step 6a). Do NOT trust stored `threadId`s or the state findings list alone — force-pushes can delete and re-create thread nodes, and earlier runs may have dropped findings whose resolution silently failed. Sweep ALL live unresolved threads that were authored by the bot: for each, check whether the issue its comment describes is fixed at HEAD.
+- For each such thread whose issue is fixed, resolve it via GraphQL and **verify the response says `"isResolved": true`** — if the call errors or returns null, the thread is NOT resolved; keep its finding in the state:
 
 ```
 gh api graphql -f query='
