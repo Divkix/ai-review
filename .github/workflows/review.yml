@@ -538,3 +538,46 @@ jobs:
           STATE_COMMENT_ID: ${{ needs.gate.outputs.state_comment_id }}
           GITHUB_BASE_REF: ${{ needs.gate.outputs.base_ref }}
           PR_NUMBER: ${{ needs.gate.outputs.pr }}
+
+      # Deterministic safety net: the agent is instructed to resolve fixed
+      # threads, but LLM compliance is not guaranteed. If the bot's latest
+      # review verdict is APPROVE there are no outstanding blockers, so every
+      # unresolved bot-authored thread is either fixed or accepted — resolve
+      # them all here.
+      - name: Resolve bot threads on approval
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ needs.gate.outputs.pr }}
+        run: |
+          set -euo pipefail
+          latest_state=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" \
+            --jq '[.[] | select(.user.login == "github-actions[bot]" and .state != "DISMISSED")] | last | .state // empty')
+          echo "Latest bot review state: ${latest_state:-none}"
+          [ "$latest_state" = "APPROVED" ] || exit 0
+          owner="${GITHUB_REPOSITORY%/*}"
+          repo="${GITHUB_REPOSITORY#*/}"
+          thread_ids=$(gh api graphql -f query='
+            query($owner: String!, $repo: String!, $number: Int!) {
+              repository(owner: $owner, name: $repo) {
+                pullRequest(number: $number) {
+                  reviewThreads(last: 100) {
+                    nodes {
+                      id
+                      isResolved
+                      comments(first: 1) { nodes { author { login } } }
+                    }
+                  }
+                }
+              }
+            }' -f owner="$owner" -f repo="$repo" -F number="$PR_NUMBER" \
+            --jq '.data.repository.pullRequest.reviewThreads.nodes[]
+                  | select(.isResolved == false and .comments.nodes[0].author.login == "github-actions")
+                  | .id')
+          [ -n "$thread_ids" ] || { echo "No unresolved bot threads."; exit 0; }
+          while IFS= read -r id; do
+            echo "Resolving $id"
+            gh api graphql -f query='
+              mutation($id: ID!) {
+                resolveReviewThread(input: {threadId: $id}) { thread { isResolved } }
+              }' -f id="$id"
+          done <<< "$thread_ids"
