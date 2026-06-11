@@ -20,7 +20,9 @@ jobs:
     # them; a collaborator can run /review on the PR instead.
     if: github.event.pull_request.head.repo.full_name == github.repository
     permissions:
-      contents: read
+      # contents:write is needed for the resolveReviewThread GraphQL mutation
+      # (auto-resolving fixed threads); the review never pushes code.
+      contents: write
       pull-requests: write
       issues: write
       security-events: write

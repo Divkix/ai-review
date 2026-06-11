@@ -407,7 +407,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
-      contents: read
+      # contents:write is required by GitHub's resolveReviewThread GraphQL
+      # mutation — with contents:read it fails FORBIDDEN even though
+      # pull-requests:write is granted (community discussion #44650). The
+      # working tree is kept clean (see "Prepare working tree for opencode"),
+      # so nothing is ever pushed despite the write grant.
+      contents: write
       pull-requests: write
       issues: write
     steps:
