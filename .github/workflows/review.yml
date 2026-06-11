@@ -495,13 +495,22 @@ jobs:
             echo "$delim"
           } >> "$GITHUB_OUTPUT"
 
-      # opencode's runner creates git commits internally; without an identity
-      # git aborts with "empty ident name" after the review is posted.
-      - name: Configure git identity
+      # opencode's runner ends each session by checking `git status` and, if the
+      # tree is dirty, committing everything and pushing it onto the PR branch.
+      # Our injected tooling checkout and findings file are untracked, so without
+      # this they'd be committed into the user's PR and the push would need write
+      # access (and fail with 403 on a read-only review job). Hiding them via
+      # .git/info/exclude keeps the tree clean so opencode skips the push.
+      # An identity is still set so any unexpected commit doesn't abort the run.
+      - name: Prepare working tree for opencode
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898024+github-actions[bot]@users.noreply.github.com"
+          {
+            echo '.ai-review-tooling/'
+            echo 'findings.json'
+          } >> "$(git rev-parse --git-dir)/info/exclude"
 
       - name: Run LLM review
         uses: anomalyco/opencode/github@a3b97d9090ccf4aa9ac32268486283e3131e36b4 # github-v1.2.25

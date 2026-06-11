@@ -143,10 +143,7 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           fetch-depth: 0
-          # Keep credentials: opencode's runner ends every session with a
-          # `git push`. Without persisted auth that push prompts for a username
-          # and aborts (exit 128), failing the job after work is done.
-          persist-credentials: true
+          persist-credentials: false
 
       - name: Checkout ai-review tooling
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -176,13 +173,18 @@ jobs:
             echo "${delim}"
           } >> "$GITHUB_OUTPUT"
 
-      # opencode's runner creates git commits internally; without an identity
-      # git aborts with "empty ident name".
-      - name: Configure git identity
+      # opencode's runner ends each session by checking `git status` and, if the
+      # tree is dirty, committing everything and pushing it. /plan is an issue
+      # event, so opencode would otherwise create a branch + PR containing our
+      # injected tooling checkout. Hiding it via .git/info/exclude keeps the tree
+      # clean so opencode skips the push (plan only posts a comment). The identity
+      # guards against an unexpected commit aborting the run.
+      - name: Prepare working tree for opencode
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898024+github-actions[bot]@users.noreply.github.com"
+          echo '.ai-review-tooling/' >> "$(git rev-parse --git-dir)/info/exclude"
 
       - name: Generate implementation plan
         uses: anomalyco/opencode/github@a3b97d9090ccf4aa9ac32268486283e3131e36b4 # github-v1.2.25
