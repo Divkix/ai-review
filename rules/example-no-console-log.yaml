@@ -1,0 +1,13 @@
+# Example custom rule. Drop additional org-specific OpenGrep rules in this
+# directory; they are loaded in addition to the community ruleset.
+rules:
+  - id: no-console-log
+    pattern: console.log(...)
+    languages: [typescript, javascript]
+    severity: INFO
+    message: >-
+      console.log left in code. Remove debug logging or replace it with a
+      proper logger before merging.
+    paths:
+      exclude:
+        - "**/*.test.*"
