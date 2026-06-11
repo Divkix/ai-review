@@ -1,0 +1,28 @@
+# Copy this file to .github/workflows/ai-review.yml in your repo and add a
+# DEEPSEEK_API_KEY repository secret.
+# Reusable workflows can only DOWNGRADE the caller's permissions, never
+# elevate them, so the caller job must grant a superset of every permission
+# the reusable workflow's jobs request; each reusable job then narrows from
+# these.
+name: AI Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: ai-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    # Fork PRs get no secrets (DEEPSEEK_API_KEY would be empty), so skip
+    # them; a collaborator can run /review on the PR instead.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      security-events: write
+    uses: divkix/ai-review/.github/workflows/review.yml@v1
+    secrets: inherit
