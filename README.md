@@ -42,6 +42,10 @@ Only comments from authors with OWNER, MEMBER, or COLLABORATOR association are h
 4. Repo Settings → Actions → General → Workflow permissions: enable **"Allow GitHub Actions to create and approve pull requests"**. Required for the APPROVE verdict; without it, reviews fail to APPROVE and fall back to REQUEST_CHANGES/COMMENT errors.
 5. (Optional) Enable Code scanning to see SARIF annotations inline. Uploads are best-effort (`continue-on-error`); the review works without it.
 
+### First run
+
+Open a pull request against the branch your caller workflow watches. Within a minute a sticky **"🔍 ai-review is reviewing this PR…"** comment appears; when the run finishes it's rewritten in place with the verdict, and inline comments (if any) are posted. Push more commits to trigger an incremental review, or comment `/review full` to force a fresh one. On an **issue**, comment `/plan` to get a read-only implementation plan.
+
 ## Customization
 
 - **Rules**: drop additional OpenGrep rules into `rules/` in this repo — they are loaded on top of the community pack ([opengrep/opengrep-rules](https://github.com/opengrep/opengrep-rules)). See `rules/example-no-console-log.yaml`.
@@ -53,7 +57,7 @@ Only comments from authors with OWNER, MEMBER, or COLLABORATOR association are h
 
 Callers pin `@v1`. Tag releases of this repo. When cutting v2, bump every internal `v1`/`@v1` pin:
 
-1. `.github/workflows/review.yml` — tooling checkout `ref: v1` in the `static` job and in the `llm-review` job (×2).
+1. `.github/workflows/review.yml` — tooling checkout `ref: v1` in the `static` job and the `llm-review` job (2 occurrences).
 2. `.github/workflows/commands.yml` — tooling checkout `ref: v1`.
 3. `.github/workflows/commands.yml` — nested `uses: divkix/ai-review/.github/workflows/review.yml@v1` cross-workflow ref.
 4. `templates/caller-review.yml` and `templates/caller-commands.yml` — the `uses: ...@v1` lines in both templates.
@@ -67,10 +71,22 @@ Callers pin `@v1`. Tag releases of this repo. When cutting v2, bump every intern
 - Scanners never fail the build; findings flow to the LLM as data.
 - Fork PRs receive no secrets (GitHub default), so the caller template skips them via a `head.repo == repository` condition; a collaborator can trigger `/review` on the PR instead.
 
+## Troubleshooting
+
+- **Review posts a COMMENT/REQUEST_CHANGES instead of APPROVE** — the repo setting in Setup step 4 is off. Enable "Allow GitHub Actions to create and approve pull requests"; the GITHUB_TOKEN cannot APPROVE without it.
+- **`finalize` job fails on `resolveReviewThread` with FORBIDDEN** — the caller job isn't granting `contents: write`. Reusable workflows can only downgrade, so the caller in `templates/` must keep the full `permissions:` superset (Setup step 2).
+- **Nothing happens when a PR opens** — check the caller workflow is on the PR's base branch, the PR is not a draft (drafts are skipped until "Ready for review"), and the PR is not from a fork (forks get no secrets and are skipped by design; a collaborator can run `/review` instead).
+- **`/oc` does nothing** — it needs the opencode GitHub App installed (Setup step 1); the other flows use the workflow token and don't.
+- **Review ran but no inline comments / verdict** — the LLM must follow the playbook to post the review and write the `<!-- ai-review:state -->` marker. If the model skips it, `finalize` has no state to act on. Pointing the workflows at a stronger model (see Customization) is the most reliable fix.
+- **First run is slow / scans the whole repo** — Gitleaks runs in full git mode on the first pass; subsequent runs are incremental.
+
 ## Limitations
 
 - No auto-resolve UI buttons (no "Fix all").
 - No cross-PR memory; incremental state is per-PR.
+- No diff-size guard or path filters: a very large PR can blow the model's token budget, and there's no per-repo config (no `.coderabbit.yaml`-style include/exclude). Tune scope via the `prompts/` playbooks.
+- The `context` job is heuristic identifier grep, not a real call graph — expect occasional false leads, and on large repos the sweep adds latency.
+- Review *posting* (inline comments, verdict, state marker) still depends on the LLM following the playbook; only thread resolution/dismissal is deterministic.
 - Gitleaks runs in full git mode, so the first run scans the whole repo history.
 
 ## License
