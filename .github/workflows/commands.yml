@@ -173,6 +173,14 @@ jobs:
             echo "${delim}"
           } >> "$GITHUB_OUTPUT"
 
+      # opencode's runner creates git commits internally; without an identity
+      # git aborts with "empty ident name".
+      - name: Configure git identity
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898024+github-actions[bot]@users.noreply.github.com"
+
       - name: Generate implementation plan
         uses: anomalyco/opencode/github@a3b97d9090ccf4aa9ac32268486283e3131e36b4 # github-v1.2.25
         env:
@@ -209,6 +217,14 @@ jobs:
           # opencode authenticates pushes itself via the GITHUB_TOKEN env
           # (use_github_token), so leaving credentials unpersisted is correct.
           persist-credentials: false
+
+      # opencode's runner creates git commits internally; without an identity
+      # git aborts with "empty ident name".
+      - name: Configure git identity
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898024+github-actions[bot]@users.noreply.github.com"
 
       # No prompt override: opencode's native mention handling routes /oc
       # commands, including inline PR review comments.

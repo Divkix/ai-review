@@ -493,6 +493,14 @@ jobs:
             echo "$delim"
           } >> "$GITHUB_OUTPUT"
 
+      # opencode's runner creates git commits internally; without an identity
+      # git aborts with "empty ident name" after the review is posted.
+      - name: Configure git identity
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898024+github-actions[bot]@users.noreply.github.com"
+
       - name: Run LLM review
         uses: anomalyco/opencode/github@a3b97d9090ccf4aa9ac32268486283e3131e36b4 # github-v1.2.25
         with:
