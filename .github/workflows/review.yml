@@ -19,10 +19,18 @@
 #               decide mode / skip.
 #   static      opengrep + gitleaks + osv-scanner -> SARIF -> findings.json
 #               artifact. Findings never fail the job.
+#   context     ripgrep-based impact map: where do symbols touched by the
+#               diff appear elsewhere in the repo -> context.md artifact.
 #   llm-review  opencode runs the review playbook (full or incremental) with
-#               the env contract: FINDINGS_PATH, HEAD_SHA, LAST_SHA,
-#               PRIOR_STATE_JSON, PRIOR_REVIEW_ID, STATUS_COMMENT_ID,
-#               GITHUB_BASE_REF, PR_NUMBER.
+#               the env contract: FINDINGS_PATH, CONTEXT_PATH, HEAD_SHA,
+#               LAST_SHA, PRIOR_STATE_JSON, PRIOR_REVIEW_ID,
+#               STATUS_COMMENT_ID, GITHUB_BASE_REF, PR_NUMBER.
+#               Runs with contents:read — the agent reads untrusted PR
+#               content, so its token must not be able to push.
+#   finalize    deterministic post-pass (no LLM): resolve review threads for
+#               findings dropped from the new state, dismiss a superseded
+#               REQUEST_CHANGES review. Holds the contents:write needed by
+#               GitHub's resolveReviewThread mutation.
 #
 # Security: untrusted strings (comment bodies, state JSON, branch names) are
 # never interpolated into `run:` scripts via ${{ }}; they flow through `env:`
@@ -446,18 +454,103 @@ jobs:
           name: findings
           path: findings.json
 
+  # Pre-computed cross-file impact map (Tier 1 context). Heuristic by design:
+  # identifiers are mined from the diff's changed lines and grepped across the
+  # repo. ~80% of a call graph's value at ~5% of the complexity, and fully
+  # language-agnostic. The playbook treats it as leads, not gospel.
+  context:
+    needs: gate
+    if: needs.gate.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout PR head (caller repo)
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ needs.gate.outputs.head_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch base ref
+        env:
+          BASE_REF: ${{ needs.gate.outputs.base_ref }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git -c http.extraheader="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')" \
+            fetch origin "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+
+      - name: Build impact map
+        env:
+          BASE_REF: ${{ needs.gate.outputs.base_ref }}
+          MODE: ${{ needs.gate.outputs.mode }}
+          LAST_SHA: ${{ needs.gate.outputs.last_sha }}
+        run: |
+          set -euo pipefail
+          if [ "$MODE" = incremental ] && [ -n "$LAST_SHA" ] \
+            && git cat-file -e "${LAST_SHA}^{commit}" 2>/dev/null; then
+            range="${LAST_SHA}...HEAD"
+          else
+            range="origin/${BASE_REF}...HEAD"
+          fi
+          echo "Impact range: $range"
+          git diff --name-only -z "$range" > /tmp/changed.z
+          # Common keywords/types across mainstream languages; mining them as
+          # "symbols" would grep half the repo for nothing.
+          stopwords='^(if|else|elif|for|while|do|switch|case|break|continue|return|function|func|def|class|struct|enum|interface|type|import|export|from|package|module|const|let|var|val|public|private|protected|static|final|async|await|yield|new|delete|this|self|super|null|nil|none|true|false|try|catch|except|finally|throw|throws|raise|with|use|using|namespace|void|int|float|double|bool|boolean|string|char|byte|long|short|unsigned|signed|auto|template|typename|require|include|pragma|define|undef|error|warning|default|extends|implements|abstract|override|virtual|inline|extern|register|volatile|sizeof|typeof|instanceof|and|or|not|in|is|as|where|when|match|loop|impl|trait|crate|mod|pub|ref|mut|dyn|move|unsafe|defer|chan|select|range|map|print|println|printf|console|log|test|describe|expect|assert|main|init|len|cap|err|ctx|args|kwargs)$'
+          {
+            echo "# Impact map (auto-generated, heuristic)"
+            echo
+            echo "For each changed file: identifiers touched by the diff and where they are referenced elsewhere in the repo. Leads, not proof — open the files to verify."
+            echo
+            while IFS= read -r -d '' f; do
+              [ -f "$f" ] || continue
+              case "$f" in
+                *.lock|*.sum|*-lock.json|*.min.*|*.svg|*.map) continue ;;
+              esac
+              echo "## $f"
+              syms=$(git diff "$range" -- "$f" \
+                | grep -E '^[+-][^+-]' \
+                | grep -oE '\b[A-Za-z_][A-Za-z0-9_]{2,}\b' \
+                | grep -ivE "$stopwords" \
+                | sort | uniq -c | sort -rn | awk '{print $2}' | head -30 || true)
+              for s in $syms; do
+                hits=$(rg -n --no-heading -w -F "$s" \
+                        --glob '!.git' --glob '!*.lock' --glob '!*-lock.json' --glob '!*.min.*' \
+                        2>/dev/null | grep -v -F "$f:" | head -5 || true)
+                if [ -n "$hits" ]; then
+                  # shellcheck disable=SC2016
+                  printf -- '- `%s` referenced in:\n' "$s"
+                  printf '%s\n' "$hits" | sed 's/^/    /'
+                fi
+              done
+              echo
+            done < /tmp/changed.z
+          } > context.md
+          # Hard cap so a huge PR can't blow the prompt/token budget.
+          head -c 60000 context.md > context.trunc && mv context.trunc context.md
+          wc -c context.md
+
+      - name: Upload context artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: context
+          path: context.md
+
   llm-review:
-    needs: [gate, static]
+    needs: [gate, static, context]
     if: needs.gate.outputs.skip != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
-      # contents:write is required by GitHub's resolveReviewThread GraphQL
-      # mutation — with contents:read it fails FORBIDDEN even though
-      # pull-requests:write is granted (community discussion #44650). The
-      # working tree is kept clean (see "Prepare working tree for opencode"),
-      # so nothing is ever pushed despite the write grant.
-      contents: write
+      # Privilege separation: this job feeds untrusted PR content to an LLM,
+      # so its token must not be able to push code. contents:read still allows
+      # authenticated fetches. The contents:write needed by GitHub's
+      # resolveReviewThread mutation lives in the deterministic finalize job,
+      # which runs no LLM.
+      contents: read
       pull-requests: write
       issues: write
     steps:
@@ -468,11 +561,11 @@ jobs:
           # push between gate and checkout can't swap in unreviewed code.
           ref: ${{ needs.gate.outputs.head_sha }}
           fetch-depth: 0
-          # Keep credentials: opencode's runner ends every session with a
-          # `git push`. Without persisted auth that push prompts for a username
-          # and aborts (exit 128) AFTER the review is posted, failing the job.
-          # The branch has no new commits (the review is read-only), so the
-          # push is a no-op "Everything up-to-date".
+          # Keep credentials so the agent's git fetch/diff work on private
+          # repos; the token is contents:read, so a push (e.g. opencode's
+          # trailing push, or a prompt-injected one) fails with 403. The tree
+          # is kept clean (see "Prepare working tree for opencode") so the
+          # trailing push doesn't fire at all.
           persist-credentials: true
 
       # Bump ref when releasing v2 of divkix/ai-review.
@@ -488,6 +581,11 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: findings
+
+      - name: Download context artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: context
 
       - name: Fetch base ref
         env:
@@ -536,6 +634,7 @@ jobs:
             printf -- '- Head SHA: %s (also in env `HEAD_SHA`)\n' "$HEAD_SHA"
             printf -- '- Base ref: env `GITHUB_BASE_REF`\n'
             printf -- '- Static findings file: path in env `FINDINGS_PATH`\n'
+            printf -- '- Impact map file: path in env `CONTEXT_PATH`\n'
             printf -- '- Last reviewed SHA: env `LAST_SHA` (empty on full review)\n'
             printf -- '- Prior state JSON: env `PRIOR_STATE_JSON` (may be empty)\n'
             printf -- '- Prior review id: env `PRIOR_REVIEW_ID` (may be empty)\n'
@@ -564,20 +663,36 @@ jobs:
           {
             echo '.ai-review-tooling/'
             echo 'findings.json'
+            echo 'context.md'
           } >> "$(git rev-parse --git-dir)/info/exclude"
 
+      # Pinned CLI instead of the upstream wrapper action: the wrapper
+      # installs whatever the LATEST opencode release is at runtime
+      # (curl | bash), so behavior could change under us and the supply chain
+      # was unpinned. Bump version + sha256 together when upgrading.
+      - name: Install opencode (pinned)
+        run: |
+          set -euo pipefail
+          OPENCODE_VERSION="1.17.3"
+          OPENCODE_SHA256="d4bd238a2c1ff56aca1cd3397d21a0a317f5992234517a7f8e2afbbd72010a7d"
+          curl -fsSL -o /tmp/opencode.tar.gz \
+            "https://github.com/anomalyco/opencode/releases/download/v${OPENCODE_VERSION}/opencode-linux-x64.tar.gz"
+          echo "${OPENCODE_SHA256}  /tmp/opencode.tar.gz" | sha256sum -c -
+          sudo tar -xzf /tmp/opencode.tar.gz -C /usr/local/bin opencode
+          opencode --version
+
       - name: Run LLM review
-        uses: anomalyco/opencode/github@a3b97d9090ccf4aa9ac32268486283e3131e36b4 # github-v1.2.25
-        with:
-          model: deepseek/deepseek-v4-pro
-          use_github_token: 'true'
-          share: 'false'
-          prompt: ${{ steps.prompt.outputs.prompt }}
+        run: opencode github run
         env:
+          MODEL: deepseek/deepseek-v4-pro
+          USE_GITHUB_TOKEN: 'true'
+          SHARE: 'false'
+          PROMPT: ${{ steps.prompt.outputs.prompt }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           GITHUB_TOKEN: ${{ github.token }}
           GH_TOKEN: ${{ github.token }}
           FINDINGS_PATH: ${{ github.workspace }}/findings.json
+          CONTEXT_PATH: ${{ github.workspace }}/context.md
           HEAD_SHA: ${{ needs.gate.outputs.head_sha }}
           # Effective value: blanked when the baseline commit is unreachable
           # (see "Compose review prompt").
@@ -611,23 +726,68 @@ jobs:
                 [ -n "$cid" ] && gh api -X DELETE "repos/$GITHUB_REPOSITORY/issues/comments/$cid"
               done
 
-      # Deterministic safety net: the agent is instructed to resolve fixed
-      # threads, but LLM compliance is not guaranteed. If the bot's latest
-      # review verdict is APPROVE there are no outstanding blockers, so every
-      # unresolved bot-authored thread is either fixed or accepted — resolve
-      # them all here.
-      - name: Resolve bot threads on approval
+  # Deterministic post-pass — no LLM, trusted shell only. Owns the review
+  # lifecycle mutations that must not depend on agent compliance (we observed
+  # DeepSeek skip instructed steps), and isolates the contents:write that
+  # GitHub's resolveReviewThread mutation requires (FORBIDDEN with
+  # contents:read; community discussion #44650) away from the job that reads
+  # untrusted PR content.
+  finalize:
+    needs: [gate, llm-review]
+    if: needs.gate.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Reconcile review lifecycle
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ needs.gate.outputs.pr }}
+          PRIOR_REVIEW_ID: ${{ needs.gate.outputs.prior_review_id }}
         run: |
           set -euo pipefail
           latest_state=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" \
             --jq '[.[] | select(.user.login == "github-actions[bot]" and .state != "DISMISSED")] | last | .state // empty')
           echo "Latest bot review state: ${latest_state:-none}"
-          [ "$latest_state" = "APPROVED" ] || exit 0
+
+          # Dismiss the superseded REQUEST_CHANGES review when the verdict
+          # flipped to APPROVE (idempotent; the agent may have already done it).
+          if [ "$latest_state" = "APPROVED" ] && [ -n "$PRIOR_REVIEW_ID" ]; then
+            gh api -X PUT "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews/$PRIOR_REVIEW_ID/dismissals" \
+              -f message="Superseded by updated ai-review approval" -f event="DISMISS" \
+              || echo "Dismissal failed (already dismissed?); continuing."
+          fi
+
+          # The state marker the agent just wrote lists the findings that are
+          # STILL OPEN (with their live threadIds). Contract: any unresolved
+          # bot-authored thread whose id is absent from that list is fixed or
+          # stale -> resolve it. On APPROVE the list is empty, so everything
+          # bot-authored gets resolved. Threads in the state stay open.
+          state_json="$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" --paginate \
+            | jq -rs 'add
+                | [.[] | select(.user.type == "Bot"
+                    and (.user.login | startswith("github-actions"))
+                    and (.body | contains("<!-- ai-review:state")))]
+                | last
+                | (.body // "" | capture("<!-- ai-review:state (?<j>.*?) -->"; "s") | .j // "{}")')"
+          state_ids="$(jq -r '(try .findings catch []) // [] | .[].threadId // empty' <<<"$state_json" || true)"
+          null_ids="$(jq -r '(try .findings catch []) // [] | [.[] | select(.threadId == null)] | length' <<<"$state_json" 2>/dev/null || echo 0)"
+          echo "Thread ids still open per state: ${state_ids:-none} (unmapped: $null_ids)"
+          # Safety gate: when the verdict is NOT approve and the agent failed
+          # to map some open findings to thread ids (threadId null), absence
+          # from the id list is meaningless — we could wrongly resolve the
+          # very threads just posted. Only proceed if approved or mapping is
+          # complete.
+          if [ "$latest_state" != "APPROVED" ] && [ "${null_ids:-0}" -gt 0 ]; then
+            echo "Unmapped open findings on a non-approved review; skipping thread resolution."
+            exit 0
+          fi
+
           owner="${GITHUB_REPOSITORY%/*}"
           repo="${GITHUB_REPOSITORY#*/}"
+          # shellcheck disable=SC2016
           thread_ids=$(gh api graphql -f query='
             query($owner: String!, $repo: String!, $number: Int!) {
               repository(owner: $owner, name: $repo) {
@@ -647,7 +807,12 @@ jobs:
                   | .id')
           [ -n "$thread_ids" ] || { echo "No unresolved bot threads."; exit 0; }
           while IFS= read -r id; do
+            if grep -qxF "$id" <<< "$state_ids"; then
+              echo "Keeping open (still in state): $id"
+              continue
+            fi
             echo "Resolving $id"
+            # shellcheck disable=SC2016
             gh api graphql -f query='
               mutation($id: ID!) {
                 resolveReviewThread(input: {threadId: $id}) { thread { isResolved } }

@@ -8,16 +8,20 @@ Self-hosted, CodeRabbit-style AI pull request reviewer that runs entirely in Git
 flowchart LR
     A[PR event] --> B[gate]
     B --> C[static scan<br/>opengrep + gitleaks + osv]
+    B --> H[context<br/>cross-file impact map]
     C --> D[LLM review<br/>opencode + DeepSeek]
-    D --> E[PR review verdict<br/>+ state marker]
+    H --> D
+    D --> E[finalize<br/>resolve threads + dismiss]
     F[comment commands] --> G[command router]
     G --> D
 ```
 
-- **Auto full review** when a PR is opened, with a single upserted "🔍 ai-review is reviewing this PR…" ack comment (updated in place on each push, not one comment per push).
-- **Incremental review** on each push: reviews only the new commits, resolves fixed review threads via GraphQL, dismisses the bot's stale REQUEST_CHANGES review, and re-verdicts APPROVE or REQUEST_CHANGES.
+- **Auto full review** when a PR is opened, with one sticky status comment (mode, commit links, trigger, verdict) updated in place — never one comment per push.
+- **Incremental review** on each push: reviews only the new commits, then a deterministic `finalize` job resolves fixed review threads via GraphQL and dismisses the bot's stale REQUEST_CHANGES review.
+- **Cross-file context**: a `context` job greps the repo for references to every symbol the diff touches and hands the LLM an impact map; the playbook makes the agent verify call sites before judging signature/behavior changes.
+- **Noise control**: every finding gets severity + confidence + evidence (scanner-confirmed and caller-verified rank highest), a self-critique pass deletes unproven findings, inline comments are budgeted to 10 blockers/majors, and minors collapse into one `<details>` block.
 - **Draft PRs** get a single "will start when ready" comment and are skipped until marked ready for review.
-- **State** lives in a hidden `<!-- ai-review:state ... -->` PR comment holding the last reviewed SHA and finding fingerprints — no database.
+- **State** lives in a hidden `<!-- ai-review:state ... -->` marker inside the sticky status comment, holding the last reviewed SHA and still-open finding fingerprints/thread ids — no database.
 
 ## Commands
 
@@ -42,7 +46,8 @@ Only comments from authors with OWNER, MEMBER, or COLLABORATOR association are h
 
 - **Rules**: drop additional OpenGrep rules into `rules/` in this repo — they are loaded on top of the community pack ([opengrep/opengrep-rules](https://github.com/opengrep/opengrep-rules)). See `rules/example-no-console-log.yaml`.
 - **Prompts**: edit the playbooks in `prompts/` (`review-full.md`, `review-incremental.md`, `plan.md`) to tune review behavior, verdict policy, and comment formats.
-- **Model**: `deepseek/deepseek-v4-pro`, set in the workflows. Swap by editing `.github/workflows/review.yml` and `commands.yml` — any [models.dev](https://models.dev) provider works with its corresponding env API key.
+- **Model**: `deepseek/deepseek-v4-pro`, set in the workflows. Swap by editing `.github/workflows/review.yml` and `commands.yml` — any [models.dev](https://models.dev) provider works with its corresponding env API key. The scaffolding (scanners, context, ranking, lifecycle) is model-agnostic; pointing it at a stronger model is the single biggest review-quality lever.
+- **opencode CLI**: pinned by version + sha256 in the workflows (`OPENCODE_VERSION` in `review.yml` ×1 and `commands.yml` ×2). Bump both values together.
 
 ## Versioning
 
@@ -57,8 +62,8 @@ Callers pin `@v1`. Tag releases of this repo. When cutting v2, bump every intern
 
 - Commands are gated by `author_association` (OWNER/MEMBER/COLLABORATOR) and bot comments are rejected.
 - Untrusted content (comment bodies, issue titles/bodies, state JSON) is passed via `env:` only — never interpolated into `run:` scripts.
-- All third-party actions are pinned to commit SHAs.
-- `persist-credentials: false` on every checkout.
+- All third-party actions are pinned to commit SHAs; the opencode CLI is pinned by version + sha256 (no install-latest-at-runtime).
+- Privilege separation: the job that feeds untrusted PR content to the LLM runs with `contents: read` (its token cannot push, even if prompt-injected); the `contents: write` required by GitHub's `resolveReviewThread` mutation lives only in the deterministic `finalize` job, which runs no LLM.
 - Scanners never fail the build; findings flow to the LLM as data.
 - Fork PRs receive no secrets (GitHub default), so the caller template skips them via a `head.repo == repository` condition; a collaborator can trigger `/review` on the PR instead.
 

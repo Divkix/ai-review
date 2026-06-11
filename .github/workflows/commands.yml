@@ -113,8 +113,8 @@ jobs:
     needs: route
     if: needs.route.outputs.cmd == 'review' || needs.route.outputs.cmd == 'review_full'
     # Must be a superset of the permissions the called workflow's jobs request.
-    # contents:write is needed by the llm-review job's resolveReviewThread
-    # GraphQL mutation (it never pushes code).
+    # contents:write is needed by the review.yml finalize job's
+    # resolveReviewThread GraphQL mutation (no job ever pushes code).
     permissions:
       contents: write
       issues: write
@@ -189,9 +189,26 @@ jobs:
           git config user.email "41898024+github-actions[bot]@users.noreply.github.com"
           echo '.ai-review-tooling/' >> "$(git rev-parse --git-dir)/info/exclude"
 
+      # Pinned CLI instead of the upstream wrapper action (which installs the
+      # latest release at runtime). Bump version + sha256 together.
+      - name: Install opencode (pinned)
+        run: |
+          set -euo pipefail
+          OPENCODE_VERSION="1.17.3"
+          OPENCODE_SHA256="d4bd238a2c1ff56aca1cd3397d21a0a317f5992234517a7f8e2afbbd72010a7d"
+          curl -fsSL -o /tmp/opencode.tar.gz \
+            "https://github.com/anomalyco/opencode/releases/download/v${OPENCODE_VERSION}/opencode-linux-x64.tar.gz"
+          echo "${OPENCODE_SHA256}  /tmp/opencode.tar.gz" | sha256sum -c -
+          sudo tar -xzf /tmp/opencode.tar.gz -C /usr/local/bin opencode
+          opencode --version
+
       - name: Generate implementation plan
-        uses: anomalyco/opencode/github@a3b97d9090ccf4aa9ac32268486283e3131e36b4 # github-v1.2.25
+        run: opencode github run
         env:
+          MODEL: deepseek/deepseek-v4-pro
+          USE_GITHUB_TOKEN: 'true'
+          SHARE: 'false'
+          PROMPT: ${{ steps.prompt.outputs.prompt }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           GITHUB_TOKEN: ${{ github.token }}
           GH_TOKEN: ${{ github.token }}
@@ -201,11 +218,6 @@ jobs:
           # them as data.
           ISSUE_TITLE: ${{ github.event.issue.title }}
           ISSUE_BODY: ${{ github.event.issue.body }}
-        with:
-          model: deepseek/deepseek-v4-pro
-          use_github_token: 'true'
-          share: 'false'
-          prompt: ${{ steps.prompt.outputs.prompt }}
 
   oc:
     needs: route
@@ -236,15 +248,27 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898024+github-actions[bot]@users.noreply.github.com"
 
+      # Pinned CLI instead of the upstream wrapper action (which installs the
+      # latest release at runtime). Bump version + sha256 together.
+      - name: Install opencode (pinned)
+        run: |
+          set -euo pipefail
+          OPENCODE_VERSION="1.17.3"
+          OPENCODE_SHA256="d4bd238a2c1ff56aca1cd3397d21a0a317f5992234517a7f8e2afbbd72010a7d"
+          curl -fsSL -o /tmp/opencode.tar.gz \
+            "https://github.com/anomalyco/opencode/releases/download/v${OPENCODE_VERSION}/opencode-linux-x64.tar.gz"
+          echo "${OPENCODE_SHA256}  /tmp/opencode.tar.gz" | sha256sum -c -
+          sudo tar -xzf /tmp/opencode.tar.gz -C /usr/local/bin opencode
+          opencode --version
+
       # No prompt override: opencode's native mention handling routes /oc
       # commands, including inline PR review comments.
       - name: Run opencode
-        uses: anomalyco/opencode/github@a3b97d9090ccf4aa9ac32268486283e3131e36b4 # github-v1.2.25
+        run: opencode github run
         env:
+          MODEL: deepseek/deepseek-v4-pro
+          USE_GITHUB_TOKEN: 'true'
+          SHARE: 'false'
+          MENTIONS: '/oc,/opencode'
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           GITHUB_TOKEN: ${{ github.token }}
-        with:
-          model: deepseek/deepseek-v4-pro
-          use_github_token: 'true'
-          share: 'false'
-          mentions: '/oc,/opencode'
