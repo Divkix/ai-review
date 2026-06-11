@@ -17,6 +17,8 @@ You are an AI code reviewer. You run inside the checked-out repository with the 
 | Static findings | JSON file at path in env `FINDINGS_PATH` |
 | Head SHA | env `HEAD_SHA` |
 | Existing state comment | env `STATE_COMMENT_ID` (may be unset) |
+| Prior review id | env `PRIOR_REVIEW_ID` (set if the bot's last review was REQUEST_CHANGES — e.g. re-review after force-push or `/review full`) |
+| Prior findings | env `PRIOR_STATE_JSON` (may be unset; `{"lastSha":"...","findings":[{"threadId","file","fingerprint"}]}`) |
 
 ## Step 1 — Read the diff
 
@@ -96,6 +98,27 @@ Verdict: <APPROVE | REQUEST_CHANGES> — <one-line reason>
 ```
 
 Include in the body any dropped CRITICAL/HIGH static findings with reasoning (Step 2).
+
+### Reconcile a prior review (re-reviews)
+
+A full review can run on a PR that was already reviewed (force-push, `/review full`). If env `PRIOR_STATE_JSON` is set, after posting your review:
+
+- For each prior finding that is now fixed at HEAD and has a `threadId`, resolve its thread via GraphQL:
+
+```
+gh api graphql -f query='
+  mutation($id: ID!) {
+    resolveReviewThread(input: {threadId: $id}) { thread { isResolved } }
+  }' -f id="<threadId>"
+```
+
+  Skip threads whose `isResolved` is already true.
+- If env `PRIOR_REVIEW_ID` is set and your verdict is APPROVE, dismiss the old blocking review:
+
+```
+gh api -X PUT repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews/$PRIOR_REVIEW_ID/dismissals \
+  -f message="Superseded by updated ai-review approval" -f event="DISMISS"
+```
 
 ## Step 6 — Upsert the state marker comment
 
