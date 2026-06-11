@@ -1,0 +1,224 @@
+# commands.yml — reusable command router for divkix/ai-review.
+#
+# Caller repos invoke this from `issue_comment` (created) and
+# `pull_request_review_comment` (created) events, pre-gated on the comment
+# body containing /review, /plan, or /oc.
+#
+# Routing table:
+#   /review full   (PR only)     -> review job, mode=full
+#   /review        (PR only)     -> review job, mode=incremental
+#   /plan          (issue only)  -> plan job (read-only implementation plan)
+#   /oc, /opencode (PR or issue) -> oc job (opencode native mention handling)
+#
+# Security:
+#   - Bot comments are ignored.
+#   - Only OWNER/MEMBER/COLLABORATOR comment authors are honored
+#     (author_association is trusted GitHub metadata).
+#   - Comment bodies / issue titles are untrusted: they are only ever passed
+#     via `env:` into scripts/actions, never interpolated into script text.
+
+name: Commands
+
+on:
+  workflow_call:
+    secrets:
+      DEEPSEEK_API_KEY:
+        required: true
+
+jobs:
+  route:
+    # Security gates first: never act on bot comments, and only trust
+    # repo owners/members/collaborators.
+    if: >-
+      github.event.comment.user.type != 'Bot' &&
+      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    outputs:
+      cmd: ${{ steps.route.outputs.cmd }}
+      is_pr: ${{ steps.route.outputs.is_pr }}
+      number: ${{ steps.route.outputs.number }}
+    steps:
+      - name: Parse and route command
+        id: route
+        env:
+          # BODY is untrusted user content: keep it in env, never inline it
+          # into the script.
+          BODY: ${{ github.event.comment.body }}
+          EVENT_NAME: ${{ github.event_name }}
+          # issue_comment fires on both issues and PRs; the comment is on a PR
+          # iff event.issue.pull_request is set. pull_request_review_comment
+          # is always on a PR.
+          IS_PR: ${{ (github.event_name == 'pull_request_review_comment' || github.event.issue.pull_request != null) && 'true' || 'false' }}
+          NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          cmd=none
+          if grep -qE '^[[:space:]]*/review[[:space:]]+full\b' <<<"$BODY"; then
+            cmd=review_full
+          elif grep -qE '^[[:space:]]*/review\b' <<<"$BODY"; then
+            cmd=review
+          elif grep -qE '^[[:space:]]*/plan\b' <<<"$BODY"; then
+            cmd=plan
+          # Line-anchored like the other commands. Note: opencode's own
+          # `mentions` input would match /oc mid-line, but this router
+          # requires the command to start the comment.
+          elif grep -qE '^[[:space:]]*/(oc|opencode)\b' <<<"$BODY"; then
+            cmd=oc
+          fi
+
+          # Guard rails: friendly replies for commands used in the wrong place.
+          case "$cmd" in
+            review|review_full)
+              if [ "$IS_PR" != "true" ]; then
+                gh api "repos/${REPO}/issues/${NUMBER}/comments" \
+                  -f body="\`/review\` only works on pull requests."
+                cmd=none
+              fi
+              ;;
+            plan)
+              if [ "$IS_PR" = "true" ]; then
+                gh api "repos/${REPO}/issues/${NUMBER}/comments" \
+                  -f body="\`/plan\` only works on issues — open an issue describing the change and run \`/plan\` there."
+                cmd=none
+              fi
+              ;;
+          esac
+
+          # Acknowledge accepted commands with an eyes reaction.
+          if [ "$cmd" != "none" ]; then
+            if [ "$EVENT_NAME" = "pull_request_review_comment" ]; then
+              reactions_endpoint="repos/${REPO}/pulls/comments/${COMMENT_ID}/reactions"
+            else
+              reactions_endpoint="repos/${REPO}/issues/comments/${COMMENT_ID}/reactions"
+            fi
+            gh api "$reactions_endpoint" -f content=eyes
+          fi
+
+          {
+            echo "cmd=${cmd}"
+            echo "is_pr=${IS_PR}"
+            echo "number=${NUMBER}"
+          } >> "$GITHUB_OUTPUT"
+
+  review:
+    needs: route
+    if: needs.route.outputs.cmd == 'review' || needs.route.outputs.cmd == 'review_full'
+    # Must be a superset of the permissions the called workflow's jobs request.
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+      security-events: write
+    # NOTE: a relative `./.github/workflows/review.yml` ref would resolve in
+    # the CALLER's repo (this workflow runs in the caller's context), so the
+    # absolute ref is required. Bump @v1 on release.
+    uses: divkix/ai-review/.github/workflows/review.yml@v1
+    with:
+      mode: ${{ needs.route.outputs.cmd == 'review_full' && 'full' || 'incremental' }}
+      pr_number: ${{ needs.route.outputs.number }}
+    # `secrets: inherit` is unreliable across nested workflow_call layers;
+    # forward explicitly.
+    secrets:
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+
+  plan:
+    needs: route
+    if: needs.route.outputs.cmd == 'plan'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout caller repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout ai-review tooling
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          repository: divkix/ai-review
+          ref: v1 # bump on release
+          path: .ai-review-tooling
+          persist-credentials: false
+
+      - name: Compose plan prompt
+        id: prompt
+        env:
+          ISSUE_NUMBER: ${{ needs.route.outputs.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          delim="PROMPT_EOF_$(uuidgen)"
+          {
+            echo "prompt<<${delim}"
+            cat .ai-review-tooling/prompts/plan.md
+            echo ""
+            echo "## Run context"
+            echo ""
+            echo "- Repository: ${REPO}"
+            echo "- Issue number: ${ISSUE_NUMBER}"
+            echo "- If the ISSUE_TITLE / ISSUE_BODY env vars are missing or truncated, fetch them with \`gh issue view ${ISSUE_NUMBER}\` instead."
+            echo "${delim}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Generate implementation plan
+        uses: anomalyco/opencode/github@a3b97d9090ccf4aa9ac32268486283e3131e36b4 # github-v1.2.25
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ needs.route.outputs.number }}
+          # Untrusted user content: env-only is safe (not shell-interpolated);
+          # never put these into the prompt string. The plan.md playbook reads
+          # them as data.
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        with:
+          model: deepseek/deepseek-v4-pro
+          use_github_token: 'true'
+          share: 'false'
+          prompt: ${{ steps.prompt.outputs.prompt }}
+
+  oc:
+    needs: route
+    if: needs.route.outputs.cmd == 'oc'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      id-token: write
+      contents: write
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Checkout caller repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+          # opencode authenticates pushes itself via the GITHUB_TOKEN env
+          # (use_github_token), so leaving credentials unpersisted is correct.
+          persist-credentials: false
+
+      # No prompt override: opencode's native mention handling routes /oc
+      # commands, including inline PR review comments.
+      - name: Run opencode
+        uses: anomalyco/opencode/github@a3b97d9090ccf4aa9ac32268486283e3131e36b4 # github-v1.2.25
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          model: deepseek/deepseek-v4-pro
+          use_github_token: 'true'
+          share: 'false'
+          mentions: '/oc,/opencode'
