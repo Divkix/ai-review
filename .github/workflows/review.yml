@@ -418,7 +418,12 @@ jobs:
           # push between gate and checkout can't swap in unreviewed code.
           ref: ${{ needs.gate.outputs.head_sha }}
           fetch-depth: 0
-          persist-credentials: false
+          # Keep credentials: opencode's runner ends every session with a
+          # `git push`. Without persisted auth that push prompts for a username
+          # and aborts (exit 128) AFTER the review is posted, failing the job.
+          # The branch has no new commits (the review is read-only), so the
+          # push is a no-op "Everything up-to-date".
+          persist-credentials: true
 
       # Bump ref when releasing v2 of divkix/ai-review.
       - name: Checkout ai-review tooling (prompts)
@@ -437,13 +442,10 @@ jobs:
       - name: Fetch base ref
         env:
           BASE_REF: ${{ needs.gate.outputs.base_ref }}
-          # Checkout used persist-credentials: false, so fetches are
-          # unauthenticated by default and would fail on private repos.
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          git -c http.extraheader="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')" \
-            fetch origin "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+          # Checkout persists credentials, so origin is already authenticated.
+          git fetch origin "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
 
       - name: Compose review prompt
         id: prompt

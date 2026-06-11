@@ -143,7 +143,10 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           fetch-depth: 0
-          persist-credentials: false
+          # Keep credentials: opencode's runner ends every session with a
+          # `git push`. Without persisted auth that push prompts for a username
+          # and aborts (exit 128), failing the job after work is done.
+          persist-credentials: true
 
       - name: Checkout ai-review tooling
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -214,9 +217,11 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           fetch-depth: 0
-          # opencode authenticates pushes itself via the GITHUB_TOKEN env
-          # (use_github_token), so leaving credentials unpersisted is correct.
-          persist-credentials: false
+          # Keep credentials: opencode's runner ends every session with a
+          # `git push` against `origin`. Without persisted auth that push
+          # prompts for a username and aborts (exit 128). /oc may push real
+          # commits (e.g. applying a fix), so it needs working auth here.
+          persist-credentials: true
 
       # opencode's runner creates git commits internally; without an identity
       # git aborts with "empty ident name".
