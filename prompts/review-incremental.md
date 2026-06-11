@@ -29,9 +29,7 @@ Run `git diff $LAST_SHA...$HEAD_SHA`. Use `git diff origin/$GITHUB_BASE_REF...HE
 
 ## Step 2 — Reconcile prior findings
 
-Parse `PRIOR_STATE_JSON`. For each prior finding:
-
-- If its `threadId` is null/missing, first recover it: fetch the PR's review threads via GraphQL and match by path + fingerprint/body:
+Parse `PRIOR_STATE_JSON`. First fetch the PR's live review threads via GraphQL — stored `threadId`s can be stale (force-pushes may delete and re-create thread nodes), so always match prior findings against the live list: by `threadId` when it appears there, otherwise by path + fingerprint/body:
 
 ```
 gh api graphql -f query='

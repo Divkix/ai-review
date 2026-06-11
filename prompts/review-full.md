@@ -103,7 +103,8 @@ Include in the body any dropped CRITICAL/HIGH static findings with reasoning (St
 
 A full review can run on a PR that was already reviewed (force-push, `/review full`). If env `PRIOR_STATE_JSON` is set, after posting your review:
 
-- For each prior finding that is now fixed at HEAD and has a `threadId`, resolve its thread via GraphQL:
+- First fetch the PR's live review threads via GraphQL (same query as Step 6a). Stored `threadId`s can go stale — a force-push may delete and re-create thread nodes — so match each prior finding to a live thread by `threadId` if it appears in the live list, otherwise by path + fingerprint/body. Skip threads already `isResolved`.
+- For each prior finding that is now fixed at HEAD, resolve its matched live thread via GraphQL:
 
 ```
 gh api graphql -f query='
