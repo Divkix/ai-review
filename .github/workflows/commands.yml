@@ -127,6 +127,7 @@ jobs:
     with:
       mode: ${{ needs.route.outputs.cmd == 'review_full' && 'full' || 'incremental' }}
       pr_number: ${{ needs.route.outputs.number }}
+      trigger_url: ${{ github.event.comment.html_url }}
     # `secrets: inherit` is unreliable across nested workflow_call layers;
     # forward explicitly.
     secrets:

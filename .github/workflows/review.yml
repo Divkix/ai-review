@@ -21,7 +21,7 @@
 #               artifact. Findings never fail the job.
 #   llm-review  opencode runs the review playbook (full or incremental) with
 #               the env contract: FINDINGS_PATH, HEAD_SHA, LAST_SHA,
-#               PRIOR_STATE_JSON, PRIOR_REVIEW_ID, STATE_COMMENT_ID,
+#               PRIOR_STATE_JSON, PRIOR_REVIEW_ID, STATUS_COMMENT_ID,
 #               GITHUB_BASE_REF, PR_NUMBER.
 #
 # Security: untrusted strings (comment bodies, state JSON, branch names) are
@@ -39,6 +39,10 @@ on:
         default: auto
       pr_number:
         description: "PR number; required when called from issue_comment context"
+        type: string
+        default: ''
+      trigger_url:
+        description: "URL of the comment that triggered this review (command runs)"
         type: string
         default: ''
     secrets:
@@ -60,7 +64,8 @@ jobs:
       base_ref: ${{ steps.resolve.outputs.base_ref }}
       skip: ${{ steps.resolve.outputs.skip == 'true' || steps.decide.outputs.skip == 'true' }}
       mode: ${{ steps.decide.outputs.mode }}
-      state_comment_id: ${{ steps.state.outputs.state_comment_id }}
+      ack_comment_id: ${{ steps.ack.outputs.ack_comment_id }}
+      trigger_desc: ${{ steps.ack.outputs.trigger_desc }}
       state_json: ${{ steps.state.outputs.state_json }}
       last_sha: ${{ steps.state.outputs.last_sha }}
       prior_review_id: ${{ steps.prior.outputs.prior_review_id }}
@@ -98,26 +103,6 @@ jobs:
           fi
           echo "skip=false" >> "$GITHUB_OUTPUT"
 
-      - name: Post ack comment (single comment, upserted per run)
-        if: steps.resolve.outputs.skip != 'true'
-        env:
-          PR: ${{ steps.resolve.outputs.pr }}
-          HEAD_SHA: ${{ steps.resolve.outputs.head_sha }}
-        run: |
-          set -euo pipefail
-          # SHA-less marker: one ack comment per PR, refreshed in place on
-          # every run instead of spamming one comment per head SHA.
-          marker="<!-- ai-review:ack -->"
-          short_sha="${HEAD_SHA:0:7}"
-          body="$(printf '%s\n\n%s' "$marker" "🔍 ai-review is reviewing this PR… (${short_sha})")"
-          existing_id="$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
-            | jq -rs --arg m "$marker" 'add | [.[] | select(.body | contains($m))] | last | .id // empty')"
-          if [ -n "$existing_id" ]; then
-            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$existing_id" -f body="$body" > /dev/null
-          else
-            gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" -f body="$body" > /dev/null
-          fi
-
       - name: Read state marker comment
         id: state
         if: steps.resolve.outputs.skip != 'true'
@@ -132,11 +117,9 @@ jobs:
           state_comment="$(jq -c '[.[]
             | select(.user.type == "Bot" and (.user.login | startswith("github-actions")))
             | select(.body | contains("<!-- ai-review:state"))] | last // empty' "$RUNNER_TEMP/comments.json")"
-          state_comment_id=""
           state_json=""
           last_sha=""
           if [ -n "$state_comment" ]; then
-            state_comment_id="$(jq -r '.id' <<<"$state_comment")"
             raw="$(jq -r '.body | capture("<!-- ai-review:state (?<j>.*?) -->"; "s") | .j // ""' <<<"$state_comment" || true)"
             if [ -n "$raw" ] && state_json="$(jq -c . <<<"$raw" 2>/dev/null)"; then
               last_sha="$(jq -r '.lastSha // ""' <<<"$state_json")"
@@ -149,12 +132,8 @@ jobs:
           if ! grep -qE '^[0-9a-f]{40}$' <<<"$last_sha"; then
             last_sha=""
           fi
-          if ! grep -qE '^[0-9]+$' <<<"$state_comment_id"; then
-            state_comment_id=""
-          fi
           delim="STATE_EOF_$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
           {
-            echo "state_comment_id=$state_comment_id"
             echo "last_sha=$last_sha"
             echo "state_json<<$delim"
             echo "$state_json"
@@ -213,6 +192,72 @@ jobs:
             echo "skip=$skip"
             echo "mode=$mode"
           } >> "$GITHUB_OUTPUT"
+
+      # ONE sticky status comment per PR (marker: ai-review:ack). It carries
+      # the in-progress status now, gets rewritten with the final status by
+      # the llm-review job, and embeds the state marker so no separate state
+      # comment exists.
+      - name: Upsert status comment
+        id: ack
+        if: steps.resolve.outputs.skip != 'true' && steps.decide.outputs.skip != 'true'
+        env:
+          PR: ${{ steps.resolve.outputs.pr }}
+          HEAD_SHA: ${{ steps.resolve.outputs.head_sha }}
+          LAST_SHA: ${{ steps.state.outputs.last_sha }}
+          MODE: ${{ steps.decide.outputs.mode }}
+          STATE_JSON: ${{ steps.state.outputs.state_json }}
+          TRIGGER_URL: ${{ inputs.trigger_url }}
+          EVENT_ACTION: ${{ github.event.action }}
+        run: |
+          set -euo pipefail
+          marker="<!-- ai-review:ack -->"
+          repo_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+          short_head="${HEAD_SHA:0:7}"
+          if [ "$MODE" = "incremental" ] && [ -n "$LAST_SHA" ]; then
+            range="[\`${LAST_SHA:0:7}\`…\`${short_head}\`](${repo_url}/compare/${LAST_SHA}...${HEAD_SHA})"
+          else
+            range="[\`${short_head}\`](${repo_url}/commit/${HEAD_SHA})"
+          fi
+          if [ -n "$TRIGGER_URL" ]; then
+            trigger="[comment](${TRIGGER_URL})"
+          else
+            case "$EVENT_ACTION" in
+              opened) trigger="PR opened" ;;
+              synchronize) trigger="push" ;;
+              ready_for_review) trigger="marked ready for review" ;;
+              reopened) trigger="PR reopened" ;;
+              *) trigger="${EVENT_ACTION:-event}" ;;
+            esac
+          fi
+          state_line=""
+          [ -n "$STATE_JSON" ] && state_line="<!-- ai-review:state $STATE_JSON -->"
+          body="$(printf '%s\n\n🔍 ai-review: **%s** review of %s in progress… (triggered by %s)\n\n%s' \
+            "$marker" "$MODE" "$range" "$trigger" "$state_line")"
+          existing_id="$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
+            | jq -rs --arg m "$marker" 'add | [.[] | select(.body | contains($m))] | last | .id // empty')"
+          if [ -n "$existing_id" ]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$existing_id" -f body="$body" > /dev/null
+            ack_id="$existing_id"
+          else
+            ack_id="$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" -f body="$body" --jq .id)"
+          fi
+          {
+            echo "ack_comment_id=$ack_id"
+            echo "trigger_desc=$trigger"
+          } >> "$GITHUB_OUTPUT"
+          # Migration/dedup: state now lives inside this status comment.
+          # Remove any standalone bot state comments so the gate never reads
+          # a stale one on later runs.
+          gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
+            | jq -rs --argjson keep "$ack_id" 'add
+                | [.[] | select(.user.type == "Bot"
+                    and (.user.login | startswith("github-actions"))
+                    and (.body | contains("<!-- ai-review:state"))
+                    and (.id != $keep))]
+                | .[].id' \
+            | while IFS= read -r cid; do
+                [ -n "$cid" ] && gh api -X DELETE "repos/$GITHUB_REPOSITORY/issues/comments/$cid"
+              done
 
   static:
     needs: gate
@@ -473,7 +518,10 @@ jobs:
               effective_last_sha=""
             fi
           fi
-          echo "effective_last_sha=$effective_last_sha" >> "$GITHUB_OUTPUT"
+          {
+            echo "effective_last_sha=$effective_last_sha"
+            echo "effective_mode=$effective_mode"
+          } >> "$GITHUB_OUTPUT"
           if [ "$effective_mode" = "incremental" ]; then
             playbook=".ai-review-tooling/prompts/review-incremental.md"
           else
@@ -491,7 +539,8 @@ jobs:
             printf -- '- Last reviewed SHA: env `LAST_SHA` (empty on full review)\n'
             printf -- '- Prior state JSON: env `PRIOR_STATE_JSON` (may be empty)\n'
             printf -- '- Prior review id: env `PRIOR_REVIEW_ID` (may be empty)\n'
-            printf -- '- State comment id: env `STATE_COMMENT_ID` (may be empty)\n'
+            printf -- '- Status comment id: env `STATUS_COMMENT_ID`\n'
+            printf -- '- Trigger description: env `TRIGGER_DESC`\n'
           } > "$RUNNER_TEMP/prompt.md"
           delim="PROMPT_EOF_$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
           {
@@ -535,9 +584,32 @@ jobs:
           LAST_SHA: ${{ steps.prompt.outputs.effective_last_sha }}
           PRIOR_STATE_JSON: ${{ needs.gate.outputs.state_json }}
           PRIOR_REVIEW_ID: ${{ needs.gate.outputs.prior_review_id }}
-          STATE_COMMENT_ID: ${{ needs.gate.outputs.state_comment_id }}
+          STATUS_COMMENT_ID: ${{ needs.gate.outputs.ack_comment_id }}
+          TRIGGER_DESC: ${{ needs.gate.outputs.trigger_desc }}
+          REVIEW_MODE: ${{ steps.prompt.outputs.effective_mode }}
           GITHUB_BASE_REF: ${{ needs.gate.outputs.base_ref }}
           PR_NUMBER: ${{ needs.gate.outputs.pr }}
+
+      # opencode's runner always posts its final chat response as a PR comment
+      # (hardcoded in `opencode github run`). The review + sticky status
+      # comment already carry everything, so delete it; it is identifiable by
+      # the "[github run](…/actions/runs/<id>)" footer pointing at THIS run.
+      # On failure we keep it — it may carry useful error context.
+      - name: Delete opencode auto-comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ needs.gate.outputs.pr }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" --paginate \
+            | jq -rs --arg run "actions/runs/$GITHUB_RUN_ID" 'add
+                | [.[] | select(.user.type == "Bot"
+                    and (.user.login | startswith("github-actions"))
+                    and (.body | contains($run)))]
+                | .[].id' \
+            | while IFS= read -r cid; do
+                [ -n "$cid" ] && gh api -X DELETE "repos/$GITHUB_REPOSITORY/issues/comments/$cid"
+              done
 
       # Deterministic safety net: the agent is instructed to resolve fixed
       # threads, but LLM compliance is not guaranteed. If the bot's latest
