@@ -843,6 +843,69 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# Regression guard: workflow must extract .findings before calling
+# post_finding_fingerprints. Previously the workflow piped the whole verified.json
+# object (not .findings array) — jq 'length' counts keys, then .[$i] on an
+# object with an integer index returns null, so the loop ran N times over nulls,
+# producing N phantom fingerprinted-null entries (silent data corruption, not crash).
+# This test guards the correct workflow pattern: extract then merge back.
+# ---------------------------------------------------------------------------
+
+@test "finding_fingerprints: correct workflow pattern fingerprints .findings correctly" {
+  # This is the exact pattern used in review.yml (verbatim variable names preserved).
+  # Must produce exactly 1 fingerprinted entry with correct path/body.
+  verified_json='{
+    "mode": "full",
+    "walkthrough": "text",
+    "findings": [{"path":"a.py","body":"b","severity":"blocker","line":1}],
+    "prior": [],
+    "dropped_static": [],
+    "rejected": []
+  }'
+  # Correct pattern: extract array, fingerprint, merge back.
+  fp_findings="$(jq -c '.findings // []' <<<"$verified_json" | post_finding_fingerprints)"
+  verified_fp="$(jq --argjson f "$fp_findings" '.findings = $f' <<<"$verified_json")"
+  # Must be an array of exactly 1 finding with fingerprint set
+  count="$(jq '.findings | length' <<<"$verified_fp")"
+  [ "$count" -eq 1 ]
+  jq -e '.findings[0].fingerprint != null and (.findings[0].fingerprint | type) == "string"' <<<"$verified_fp"
+  jq -e '.findings[0].path == "a.py"' <<<"$verified_fp"
+}
+
+@test "finding_fingerprints: old broken pattern (piping full object) does NOT produce correct findings — regression" {
+  # This test documents WHY the fix was needed: piping the full verified.json
+  # object (not .findings array) to post_finding_fingerprints is broken. In the
+  # workflow's set -euo pipefail context, jq '.[$i]' with an integer index on an
+  # object errors and aborts the posting step. Outside pipefail the function
+  # iterates over object key count (6) producing phantom null entries.
+  # Either outcome is wrong. The correct pattern is: extract .findings, pipe
+  # the array, then merge back (see test above and review.yml step 1).
+  # This test verifies: the OLD pattern does NOT produce 1 finding with path=="a.py".
+  verified_json='{
+    "mode": "full",
+    "walkthrough": "text",
+    "findings": [{"path":"a.py","body":"b","severity":"blocker","line":1}],
+    "prior": [],
+    "dropped_static": [],
+    "rejected": []
+  }'
+  # OLD broken pattern (do NOT use this in production code):
+  broken_output="$(post_finding_fingerprints <<<"$verified_json" 2>/dev/null)" || broken_output=""
+  # The broken pattern must NOT produce the correct 1-finding result.
+  # Either broken_output is empty (function errored), or the count is wrong,
+  # or the first finding has no path (null path from indexing the object).
+  if [ -z "$broken_output" ]; then
+    : # empty output is correct — function errored as expected under pipefail
+  else
+    # If it produced output, it must not look like the correct 1-finding array.
+    count="$(jq 'length' <<<"$broken_output" 2>/dev/null)" || count="0"
+    first_path="$(jq -r '.[0].path // ""' <<<"$broken_output" 2>/dev/null)" || first_path=""
+    # Correct result would be: count==1 AND path=="a.py". The broken pattern must differ.
+    [ "$count" -ne 1 ] || [ "$first_path" != "a.py" ]
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # Composition smoke test: full posting pipeline under set -euo pipefail
 # Fixture: verified.json with 2 findings (1 anchorable blocker, 1 mis-anchored minor)
 # + a matching diff — exercises fingerprints → budget → anchors → compose_review
@@ -915,15 +978,13 @@ DIFF
 
   set -euo pipefail
 
-  # Step 1: fingerprint findings (post_finding_fingerprints takes an array)
-  # Wrap into verified-fp.json that mirrors what the workflow does: the whole
-  # verified object but with .findings fingerprinted in-place.
-  jq '.findings' "$verified" \
-    | post_finding_fingerprints > "$BATS_TEST_TMPDIR/findings-fp.json"
-  jq -e '.[0].fingerprint != null' "$BATS_TEST_TMPDIR/findings-fp.json"
-  # Merge fingerprinted findings back for downstream steps.
-  jq --slurpfile fp "$BATS_TEST_TMPDIR/findings-fp.json" '.findings = $fp[0]' "$verified" \
-    > "$BATS_TEST_TMPDIR/verified-fp.json"
+  # Step 1: fingerprint findings — verbatim from review.yml "Post review" run block.
+  # post_finding_fingerprints expects a JSON ARRAY; extract .findings first,
+  # then merge the fingerprinted array back into the full object.
+  # (This mirrors the fix for bug #1: feeding the whole object caused jq errors.)
+  fp_findings="$(jq -c '.findings // []' "$verified" | post_finding_fingerprints)"
+  jq --argjson f "$fp_findings" '.findings = $f' "$verified" > "$BATS_TEST_TMPDIR/verified-fp.json"
+  jq -e '.[0].fingerprint != null' <<<"$fp_findings"
 
   # Step 2: budget selection — blocker (high, valid path+line) -> inline; minor (low) -> minors
   budget_json="$(post_select_budget < "$BATS_TEST_TMPDIR/verified-fp.json")"

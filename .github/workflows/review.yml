@@ -1129,7 +1129,10 @@ jobs:
           . .ai-review-tooling/scripts/lib/post.sh
 
           # --- 1. Fingerprint findings -----------------------------------------
-          post_finding_fingerprints < "$VERIFIED_PATH" > "$RUNNER_TEMP/verified-fp.json"
+          # post_finding_fingerprints expects an ARRAY; extract .findings first,
+          # then merge the fingerprinted array back into the full object.
+          fp_findings="$(jq -c '.findings // []' "$VERIFIED_PATH" | post_finding_fingerprints)"
+          jq --argjson f "$fp_findings" '.findings = $f' "$VERIFIED_PATH" > "$RUNNER_TEMP/verified-fp.json"
 
           # --- 2. Budget selection ---------------------------------------------
           budget_json="$(post_select_budget < "$RUNNER_TEMP/verified-fp.json")"
@@ -1171,40 +1174,48 @@ jobs:
             '{"walkthrough":$w,"inline":$inline,"minors":$minors,"dropped_static":$ds,"rejected":$rej}')"
           post_compose_review "$verdict" <<<"$compose_input" > "$RUNNER_TEMP/review.json"
 
-          # --- 7. POST the review ----------------------------------------------
+          # --- 7. POST the review (deterministic 3-rung fallback ladder) ------
+          # Rung 1: composed review as-is.
+          # Rung 2: same event, inline comments stripped into minors block
+          #         (anchor-class degrade — covers 422 on any verdict).
+          # Rung 3: COMMENT event with approval notice prepended to body
+          #         (permission-class degrade — only when intended verdict is APPROVE).
+          # Each downgrade is logged with ::warning::; job fails if rung 3 exhausted.
           event_used="$verdict"
-          http_code="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" \
-            --input "$RUNNER_TEMP/review.json" \
-            -w "%{http_code}" -o "$RUNNER_TEMP/review-resp.json" 2>&1)" || http_code="$?"
-          if [ "$http_code" != "200" ]; then
-            echo "::warning::Review POST returned HTTP $http_code; attempting fallback"
-            # Fallback 1: if APPROVE was intended but forbidden, post as COMMENT
-            if [ "$verdict" = "APPROVE" ]; then
-              post_compose_review "COMMENT" <<<"$compose_input" > "$RUNNER_TEMP/review-fallback.json"
-              # Prepend approval notice to body
-              orig_body="$(jq -r '.body' "$RUNNER_TEMP/review-fallback.json")"
-              new_body="$(printf '**Verdict: APPROVE** — posted as a comment because this repository does not allow GitHub Actions to approve pull requests.\n\n%s' "$orig_body")"
-              jq --arg b "$new_body" '.body = $b' "$RUNNER_TEMP/review-fallback.json" > "$RUNNER_TEMP/review-fb2.json"
-              event_used="COMMENT"
-              gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" \
-                --input "$RUNNER_TEMP/review-fb2.json" \
-                -o "$RUNNER_TEMP/review-resp.json" || {
-                  echo "::error::Review fallback (COMMENT) also failed"; exit 1
-                }
-            else
-              # Fallback 2: 422 anchor error — degrade to no inline comments
-              degrade_input="$(jq -n \
-                --arg w "$walkthrough" \
-                --argjson minors "$(jq -n --argjson v "$valid_inline" --argjson m "$all_minors" '$v + $m')" \
-                --argjson ds "$dropped_static" \
-                --argjson rej "$rejected" \
-                '{"walkthrough":$w,"inline":[],"minors":$minors,"dropped_static":$ds,"rejected":$rej}')"
-              post_compose_review "$verdict" <<<"$degrade_input" > "$RUNNER_TEMP/review-degrade.json"
-              gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" \
+          if gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" \
+              --input "$RUNNER_TEMP/review.json" \
+              -o "$RUNNER_TEMP/review-resp.json"; then
+            : # rung 1 succeeded — nothing to do
+          else
+            echo "::warning::Review POST failed (rung 1); degrading inline comments to minors block"
+            degrade_input="$(jq -n \
+              --arg w "$walkthrough" \
+              --argjson minors "$(jq -n --argjson v "$valid_inline" --argjson m "$all_minors" '$v + $m')" \
+              --argjson ds "$dropped_static" \
+              --argjson rej "$rejected" \
+              '{"walkthrough":$w,"inline":[],"minors":$minors,"dropped_static":$ds,"rejected":$rej}')"
+            post_compose_review "$verdict" <<<"$degrade_input" > "$RUNNER_TEMP/review-degrade.json"
+            if gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" \
                 --input "$RUNNER_TEMP/review-degrade.json" \
-                -o "$RUNNER_TEMP/review-resp.json" || {
-                  echo "::error::Review degraded POST also failed"; exit 1
-                }
+                -o "$RUNNER_TEMP/review-resp.json"; then
+              : # rung 2 succeeded
+            else
+              # Rung 3: permission-class degrade — only when intended verdict is APPROVE.
+              if [ "$intended_verdict" = "APPROVE" ]; then
+                echo "::warning::Review POST failed (rung 2); posting APPROVE verdict as COMMENT (permission-class degrade)"
+                post_compose_review "COMMENT" <<<"$degrade_input" > "$RUNNER_TEMP/review-comment.json"
+                orig_body="$(jq -r '.body' "$RUNNER_TEMP/review-comment.json")"
+                new_body="$(printf '**Verdict: APPROVE** — posted as a comment because this repository does not allow GitHub Actions to approve pull requests.\n\n%s' "$orig_body")"
+                jq --arg b "$new_body" '.body = $b' "$RUNNER_TEMP/review-comment.json" > "$RUNNER_TEMP/review-comment2.json"
+                event_used="COMMENT"
+                gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" \
+                  --input "$RUNNER_TEMP/review-comment2.json" \
+                  -o "$RUNNER_TEMP/review-resp.json" \
+                  || { echo "::error::Review POST failed on all three rungs"; exit 1; }
+              else
+                echo "::error::Review POST failed (rung 2); no further fallback for verdict $verdict"
+                exit 1
+              fi
             fi
           fi
 
@@ -1400,7 +1411,9 @@ jobs:
           PR_NUMBER: ${{ needs.gate.outputs.pr }}
           PRIOR_REVIEW_ID: ${{ needs.gate.outputs.prior_review_id }}
           HEAD_SHA: ${{ needs.gate.outputs.head_sha }}
-          # Job outputs from llm-review (may be empty on job-failure path).
+          # Job output from llm-review (empty when the expression is evaluated before
+          # the posting step emitted it, e.g. reruns of finalize alone; llm-review
+          # job failures cause finalize to be SKIPPED entirely via the if: condition).
           INTENDED_VERDICT: ${{ needs.llm-review.outputs.intended_verdict }}
         run: |
           set -euo pipefail
