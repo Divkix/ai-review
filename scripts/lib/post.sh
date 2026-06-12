@@ -61,20 +61,17 @@ post_select_budget() {
   jq '
     def sev_rank: if . == "blocker" then 0 elif . == "major" then 1 else 2 end;
     def conf_rank: if . == "high" then 0 elif . == "medium" then 1 else 2 end;
+    def is_inline_candidate:
+      ((.severity // "") == "blocker" or (.severity // "") == "major") and
+      ((.confidence // "") == "high" or (.confidence // "") == "medium") and
+      ((.path // "") != "") and
+      (.line != null);
 
     (.findings // []) as $all |
 
     # Candidates for inline: blocker|major, high|medium, usable path+line
-    ($all | map(
-      select(
-        ((.severity // "") == "blocker" or (.severity // "") == "major") and
-        ((.confidence // "") == "high" or (.confidence // "") == "medium") and
-        ((.path // "") != "") and
-        (.line != null)
-      )
-    )) as $candidates |
+    ($all | map(select(is_inline_candidate))) as $candidates |
 
-    # Sort: severity rank, confidence rank, path asc, line asc
     ($candidates | sort_by([
       (.severity | sev_rank),
       (.confidence | conf_rank),
@@ -82,21 +79,11 @@ post_select_budget() {
       (.line // 0)
     ])) as $sorted |
 
-    # Cap at 10
     ($sorted[0:10]) as $inline |
     ($sorted[10:]) as $overflow |
 
     # Everything else: non-candidates + overflow
-    ($all | map(
-      select(
-        (
-          ((.severity // "") == "blocker" or (.severity // "") == "major") and
-          ((.confidence // "") == "high" or (.confidence // "") == "medium") and
-          ((.path // "") != "") and
-          (.line != null)
-        ) | not
-      )
-    )) as $rest |
+    ($all | map(select(is_inline_candidate | not))) as $rest |
 
     {
       "inline": $inline,
@@ -130,7 +117,8 @@ post_finding_fingerprints() {
   local input
   input="$(cat)"
   local length
-  length="$(jq 'length' <<<"$input")"
+  length="$(jq 'length' <<<"$input")" || return 1
+  [ "$length" -ge 0 ] 2>/dev/null || return 1
   local result='[]'
   local i=0
   while [ "$i" -lt "$length" ]; do
@@ -166,6 +154,8 @@ post_finding_fingerprints() {
 # Multi-line comments (end_line non-null) require the full range to be valid.
 # Renamed files are anchored by their NEW path.
 # Comments on absent paths or out-of-hunk lines are demoted.
+# Limitation: paths containing whitespace or special characters (as produced by
+# quoted git paths) are unsupported and will demote to the summary block.
 #
 # Usage: post_validate_anchors <diff_file> < comments.json
 post_validate_anchors() {
@@ -258,7 +248,8 @@ post_validate_anchors() {
 
   # Process each comment
   local length valid='[]' demoted='[]'
-  length="$(jq 'length' <<<"$comments_json")"
+  length="$(jq 'length' <<<"$comments_json")" || return 1
+  [ "$length" -ge 0 ] 2>/dev/null || return 1
   local i=0
   while [ "$i" -lt "$length" ]; do
     local comment path side start_line end_line is_valid
@@ -325,6 +316,8 @@ post_compose_review() {
   local verdict="$1"
   local input
   input="$(cat)"
+  # Fail loudly if stdin is not valid JSON (guards all downstream jq extracts)
+  jq -e . <<<"$input" >/dev/null || return 1
 
   local walkthrough minors_json dropped_static_json inline_json
   walkthrough="$(jq -r '.walkthrough // ""' <<<"$input")"
@@ -337,7 +330,8 @@ post_compose_review() {
 
   # Append minors section if non-empty
   local minors_count
-  minors_count="$(jq 'length' <<<"$minors_json")"
+  minors_count="$(jq 'length' <<<"$minors_json")" || return 1
+  [ "$minors_count" -ge 0 ] 2>/dev/null || return 1
   if [ "$minors_count" -gt 0 ]; then
     local minors_section
     minors_section="$(jq -r '
@@ -351,7 +345,8 @@ post_compose_review() {
 
   # Append dropped_static section if non-empty
   local dropped_count
-  dropped_count="$(jq 'length' <<<"$dropped_static_json")"
+  dropped_count="$(jq 'length' <<<"$dropped_static_json")" || return 1
+  [ "$dropped_count" -ge 0 ] 2>/dev/null || return 1
   if [ "$dropped_count" -gt 0 ]; then
     local dropped_section
     dropped_section="$(jq -r '
@@ -374,7 +369,8 @@ post_compose_review() {
   # Build comments array with per-comment body cap
   local comments_json='[]'
   local inline_count
-  inline_count="$(jq 'length' <<<"$inline_json")"
+  inline_count="$(jq 'length' <<<"$inline_json")" || return 1
+  [ "$inline_count" -ge 0 ] 2>/dev/null || return 1
   local j=0
   while [ "$j" -lt "$inline_count" ]; do
     local item path line end_line side cbody
@@ -490,11 +486,12 @@ post_compose_state() {
   local head_sha="$1"
   local findings
   findings="$(cat)"
-  jq -c \
+  local state_json
+  state_json="$(jq -c \
     --arg sha "$head_sha" \
     '{
       "lastSha": $sha,
       "findings": [.[] | {"threadId":.threadId,"file":.file,"fingerprint":.fingerprint,"severity":.severity}]
-    }' <<<"$findings" \
-  | awk '{printf "<!-- ai-review:state %s -->\n", $0}'
+    }' <<<"$findings")" || return 1
+  awk '{printf "<!-- ai-review:state %s -->\n", $0}' <<<"$state_json"
 }

@@ -795,3 +795,49 @@ EOF
   echo "$output" | grep -o '{.*}' | jq -e '.findings == []'
   echo "$output" | grep -o '{.*}' | jq -e '.lastSha == "emptysha"'
 }
+
+# ---------------------------------------------------------------------------
+# I2: malformed stdin failure-mode tests
+# Each stdin-consuming function must exit non-zero on non-JSON input.
+# ---------------------------------------------------------------------------
+
+@test "post: derive_verdict malformed stdin -> non-zero exit" {
+  run bash -c 'source "$1/scripts/lib/post.sh"; post_derive_verdict <<<"not json"' _ "$REPO_ROOT"
+  [ "$status" -ne 0 ]
+}
+
+@test "post: select_budget malformed stdin -> non-zero exit" {
+  run bash -c 'source "$1/scripts/lib/post.sh"; post_select_budget <<<"not json"' _ "$REPO_ROOT"
+  [ "$status" -ne 0 ]
+}
+
+@test "post: finding_fingerprints malformed stdin -> non-zero exit" {
+  run bash -c 'source "$1/scripts/lib/post.sh"; post_finding_fingerprints <<<"not json"' _ "$REPO_ROOT"
+  [ "$status" -ne 0 ]
+}
+
+@test "post: validate_anchors malformed stdin -> non-zero exit" {
+  local diff_file
+  diff_file="$BATS_TEST_TMPDIR/empty.diff"
+  printf '' > "$diff_file"
+  run bash -c 'source "$1/scripts/lib/post.sh"; post_validate_anchors "$2" <<<"not json"' _ "$REPO_ROOT" "$diff_file"
+  [ "$status" -ne 0 ]
+}
+
+@test "post: compose_review malformed stdin -> non-zero exit" {
+  run bash -c 'source "$1/scripts/lib/post.sh"; post_compose_review REQUEST_CHANGES <<<"not json"' _ "$REPO_ROOT"
+  [ "$status" -ne 0 ]
+}
+
+@test "post: compose_state malformed stdin -> non-zero exit" {
+  run bash -c 'source "$1/scripts/lib/post.sh"; post_compose_state abc123 <<<"not json"' _ "$REPO_ROOT"
+  [ "$status" -ne 0 ]
+}
+
+@test "post: match_threads missing posted file -> non-zero exit" {
+  local threads_file
+  threads_file="$BATS_TEST_TMPDIR/threads.json"
+  printf '[]' > "$threads_file"
+  run bash -c 'source "$1/scripts/lib/post.sh"; post_match_threads /nonexistent/path.json "$2"' _ "$REPO_ROOT" "$threads_file"
+  [ "$status" -ne 0 ]
+}
