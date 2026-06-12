@@ -1,0 +1,6 @@
+[
+  {
+    "user": { "type": "Bot", "login": "github-actions[bot]" },
+    "body": "review <!-- ai-review:state {\"lastSha\":\"bbb222\",\"findings\":\"oops\"} -->"
+  }
+]

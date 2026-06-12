@@ -50,27 +50,50 @@ reconcile_open_thread_ids() {
   jq -r '(try .findings catch []) // [] | .[].threadId // empty'
 }
 
-# Print the count of findings with a null threadId in a state JSON on stdin.
+# Decide whether thread resolution may proceed. Reads the state JSON on stdin.
+# Consolidates every safety condition:
+#   - APPROVED verdict -> always proceed (intent: resolve all bot threads).
+#   - Non-APPROVED verdicts require a state that is:
+#       fresh      (.lastSha == head_sha — the LLM updated the marker this run),
+#       well-formed (.findings absent/null or an array),
+#       non-empty  (CHANGES_REQUESTED implies >=1 open finding),
+#       fully mapped (no finding with a null threadId).
+# Prints "proceed" or "skip:<reason>" (stale-state | malformed-findings |
+# empty-findings-on-cr | unmapped-findings). Always returns 0; callers branch
+# on the printed value so an unexpected jq failure cannot be mistaken for a
+# pass.
 #
-# Usage: reconcile_null_count < state.json
-reconcile_null_count() {
-  jq -r '(try .findings catch []) // [] | [.[] | select(.threadId == null)] | length'
-}
-
-# Safety gate: should thread resolution be SKIPPED?
-# When the verdict is NOT approve and the agent failed to map some open
-# findings to thread ids (threadId null), absence of an id from the state list
-# is meaningless — resolving on it could wrongly resolve the threads just
-# posted. Only proceed (return 1) if approved, or if mapping is complete.
-#
-# Usage: reconcile_should_skip <latest_state> <null_count>
-# Returns 0 (true, skip) when it is unsafe to resolve; 1 otherwise.
-reconcile_should_skip() {
-  local latest_state="$1" null_count="$2"
-  if [ "$latest_state" != "APPROVED" ] && [ "${null_count:-0}" -gt 0 ]; then
+# Usage: reconcile_resolution_gate <latest_state> <head_sha> < state.json
+reconcile_resolution_gate() {
+  local latest_state="$1" head_sha="$2"
+  local state
+  state="$(cat)"
+  if [ "$latest_state" = "APPROVED" ]; then
+    printf 'proceed\n'
     return 0
   fi
-  return 1
+  if ! jq -e '(.findings // []) | type == "array"' <<<"$state" >/dev/null 2>&1; then
+    printf 'skip:malformed-findings\n'
+    return 0
+  fi
+  local last_sha
+  last_sha="$(jq -r '.lastSha // ""' <<<"$state")"
+  if [ "$last_sha" != "$head_sha" ]; then
+    printf 'skip:stale-state\n'
+    return 0
+  fi
+  local count null_count
+  count="$(jq -r '(.findings // []) | length' <<<"$state")"
+  null_count="$(jq -r '(.findings // []) | [.[] | select(.threadId == null)] | length' <<<"$state")"
+  if [ "$latest_state" = "CHANGES_REQUESTED" ] && [ "$count" -eq 0 ]; then
+    printf 'skip:empty-findings-on-cr\n'
+    return 0
+  fi
+  if [ "$null_count" -gt 0 ]; then
+    printf 'skip:unmapped-findings\n'
+    return 0
+  fi
+  printf 'proceed\n'
 }
 
 # Compute the set of thread ids to RESOLVE: live unresolved bot-authored thread

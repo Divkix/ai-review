@@ -777,13 +777,18 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ needs.gate.outputs.pr }}
           PRIOR_REVIEW_ID: ${{ needs.gate.outputs.prior_review_id }}
+          HEAD_SHA: ${{ needs.gate.outputs.head_sha }}
         run: |
           set -euo pipefail
           # shellcheck source=scripts/lib/reconcile.sh
           . .ai-review-tooling/scripts/lib/reconcile.sh
 
-          latest_state=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" \
-            --jq '[.[] | select(.user.login == "github-actions[bot]" and .state != "DISMISSED")] | last | .state // empty')
+          latest_state=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" --paginate \
+            | jq -rs 'add
+                | [.[] | select((.user.type == "Bot")
+                    and (.user.login | startswith("github-actions"))
+                    and (.state != "DISMISSED") and (.state != "PENDING"))]
+                | last | .state // empty')
           echo "Latest bot review state: ${latest_state:-none}"
 
           # Dismiss the superseded REQUEST_CHANGES review when the verdict
@@ -801,18 +806,20 @@ jobs:
           # bot-authored gets resolved. Threads in the state stay open.
           state_json="$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" --paginate \
             | reconcile_state_from_comments)"
-          state_ids="$(reconcile_open_thread_ids <<<"$state_json" || true)"
-          null_ids="$(reconcile_null_count <<<"$state_json" 2>/dev/null || echo 0)"
-          echo "Thread ids still open per state: ${state_ids:-none} (unmapped: $null_ids)"
-          # Safety gate: when the verdict is NOT approve and the agent failed
-          # to map some open findings to thread ids (threadId null), absence
-          # from the id list is meaningless — we could wrongly resolve the
-          # very threads just posted. Only proceed if approved or mapping is
-          # complete.
-          if reconcile_should_skip "$latest_state" "$null_ids"; then
-            echo "Unmapped open findings on a non-approved review; skipping thread resolution."
+          gate="$(reconcile_resolution_gate "$latest_state" "$HEAD_SHA" <<<"$state_json")"
+          if [ "$gate" != "proceed" ]; then
+            echo "Resolution gate: $gate — skipping thread resolution."
             exit 0
           fi
+          if [ "$latest_state" = "APPROVED" ]; then
+            # APPROVE contract: every bot-authored thread is fixed/stale; the
+            # state list is irrelevant (it may be stale if the LLM skipped the
+            # marker update). Resolve everything live.
+            state_ids=""
+          else
+            state_ids="$(reconcile_open_thread_ids <<<"$state_json")"
+          fi
+          echo "Thread ids still open per state: ${state_ids:-none}"
 
           owner="${GITHUB_REPOSITORY%/*}"
           repo="${GITHUB_REPOSITORY#*/}"
