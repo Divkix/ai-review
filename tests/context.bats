@@ -89,3 +89,48 @@ for i in range(40):
   # The lockfile section must NOT appear
   ! echo "$output" | grep -q "## package-lock.json"
 }
+
+@test "map: ignored changed file skipped via patterns-file" {
+  cd "$BATS_TEST_TMPDIR"
+  git init -q ignore_repo && cd ignore_repo
+  git config user.email "t@t" && git config user.name "t"
+
+  mkdir -p dist src
+  printf '#!/usr/bin/env bash\nold_gen_func() { echo gen; }\n' > dist/gen.sh
+  printf '#!/usr/bin/env bash\nreal_func() { echo real; }\n' > src/real.sh
+  git add dist/gen.sh src/real.sh
+  git commit -q -m "initial"
+
+  printf '#!/usr/bin/env bash\nnew_gen_func() { echo gen2; }\n' > dist/gen.sh
+  printf '#!/usr/bin/env bash\nreal_func_updated() { echo real2; }\n' > src/real.sh
+  git add dist/gen.sh src/real.sh
+  git commit -q -m "update"
+
+  # Patterns file ignores dist/**
+  printf 'dist/**\n' > "$BATS_TEST_TMPDIR/pats"
+
+  run bash -c 'source '"$REPO_ROOT"'/scripts/lib/scope.sh; source '"$REPO_ROOT"'/scripts/lib/context.sh; context_build_map "HEAD~1...HEAD" "'"$BATS_TEST_TMPDIR/pats"'"'
+  [ "$status" -eq 0 ]
+  # dist/gen.sh must NOT appear as a changed file section
+  ! echo "$output" | grep -q "## dist/gen.sh"
+  # src/real.sh should appear
+  echo "$output" | grep -q "## src/real.sh"
+}
+
+@test "map: no second arg -> existing tests unaffected" {
+  cd "$BATS_TEST_TMPDIR"
+  git init -q noarg_repo && cd noarg_repo
+  git config user.email "t@t" && git config user.name "t"
+
+  printf '#!/usr/bin/env bash\nnoarg_symbol_abc() { echo hi; }\n' > a.sh
+  git add a.sh
+  git commit -q -m "initial"
+
+  printf '#!/usr/bin/env bash\nnoarg_symbol_xyz() { echo hi; }\n' > a.sh
+  git add a.sh
+  git commit -q -m "update"
+
+  run bash -c 'source '"$REPO_ROOT"'/scripts/lib/context.sh; context_build_map "HEAD~1...HEAD"'
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "## a.sh"
+}

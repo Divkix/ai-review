@@ -4,6 +4,8 @@ This protocol applies to both full and incremental reviews. It is appended after
 
 ## Step 1.5 — Build cross-file context
 
+If env `IGNORE_PATHSPECS` is non-empty, append it (as git pathspecs after `--`) to every `git diff` you run and do not review or report on those paths; static findings already arrive filtered, and HIGH-severity findings from ignored paths are marked `ignoredPath` — surface those in the walkthrough body only.
+
 You have read-only repo tools (grep, read, glob). Before judging any change:
 
 1. Read the impact map at `$CONTEXT_PATH` — pre-computed leads on where the changed symbols are referenced elsewhere in the repo. Treat it as leads, not gospel: it is heuristic identifier matching, not a call graph.

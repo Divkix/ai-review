@@ -95,6 +95,7 @@ jobs:
       state_json: ${{ steps.state.outputs.state_json }}
       last_sha: ${{ steps.state.outputs.last_sha }}
       prior_review_id: ${{ steps.prior.outputs.prior_review_id }}
+      ignore_patterns: ${{ steps.size_guard.outputs.ignore_patterns }}
     steps:
       - name: Resolve PR and draft gate
         id: resolve
@@ -129,36 +130,111 @@ jobs:
           fi
           echo "skip=false" >> "$GITHUB_OUTPUT"
 
-      # Check that the PR is not too large for auto-review. Hard-coded generous
-      # defaults (400 files / 20 000 lines); a future build will read these from
-      # .ai-review.yml on the base branch (see docs/design/pr-scope-config.md).
-      # Guard only fires for auto-triggers; explicit /review commands bypass it
-      # via MODE_INPUT (set to 'full' or 'incremental' by commands.yml).
+      # Checked out before size_guard so scope.sh can be sourced for config
+      # parsing and filtered counts. Pinned to the same internal ref used by
+      # all other jobs; scripts/check-pins.sh asserts all internal pins share
+      # one tag so this ref is covered automatically.
+      - name: Checkout ai-review tooling (lib)
+        if: steps.resolve.outputs.skip != 'true'
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          repository: divkix/ai-review
+          ref: v0.1.0
+          path: .ai-review-tooling
+          persist-credentials: false
+
+      # Config-driven size guard. Reads .ai-review.yml from the base branch via
+      # the GitHub Contents API (PR head is NOT trusted — see design doc §1).
+      # Guard fires only for auto-triggers; explicit /review or /review full
+      # bypasses it. Filtered counts use config ignore + built-in patterns so
+      # generated files don't inflate the count.
       - name: Check PR size
         id: size_guard
         if: steps.resolve.outputs.skip != 'true'
         env:
           PR: ${{ steps.resolve.outputs.pr }}
+          BASE_REF: ${{ steps.resolve.outputs.base_ref }}
           MODE_INPUT: ${{ inputs.mode }}
-          MAX_FILES: "400"
-          MAX_LINES: "20000"
         run: |
           set -euo pipefail
-          # Explicit /review or /review full bypasses the size guard.
+          # shellcheck source=.ai-review-tooling/scripts/lib/scope.sh
+          . .ai-review-tooling/scripts/lib/scope.sh
+
+          # --- 1. Fetch config from base branch (fail-open on any error). ---
+          config_raw="$(gh api \
+            "repos/$GITHUB_REPOSITORY/contents/.ai-review.yml?ref=${BASE_REF}" \
+            -q .content 2>/dev/null \
+            | base64 -d 2>/dev/null || true)"
+
+          # --- 2. Parse config; apply defaults on invalid or absent config. ---
+          config_out="$(scope_parse_config <<< "$config_raw")"
+          valid="$(grep '^valid=' <<< "$config_out" | cut -d= -f2-)"
+          config_warning=""
+          if [ "$valid" = "false" ]; then
+            config_warning="⚠️ .ai-review.yml on ${BASE_REF} is malformed — using defaults."
+            echo "config warning: $config_warning"
+          fi
+          max_files="$(grep '^max_changed_files=' <<< "$config_out" | cut -d= -f2- || true)"
+          max_lines="$(grep '^max_diff_lines=' <<< "$config_out" | cut -d= -f2- || true)"
+          # Apply defaults when keys absent or config invalid.
+          : "${max_files:=400}"
+          : "${max_lines:=20000}"
+          if [ "$valid" = "false" ]; then
+            max_files=400
+            max_lines=20000
+          fi
+
+          # --- 3. Build combined patterns file (config ignores + builtins). ---
+          patterns_file="$(mktemp /tmp/scope-patterns.XXXXXX)"
+          grep '^ignore=' <<< "$config_out" | cut -d= -f2- >> "$patterns_file" || true
+          scope_builtin_ignores >> "$patterns_file"
+
+          # Emit config-only patterns as ignore_patterns output (newline-joined).
+          config_patterns="$(grep '^ignore=' <<< "$config_out" | cut -d= -f2- || true)"
+          delim_ip="IGNPAT_EOF_$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+          {
+            echo "ignore_patterns<<${delim_ip}"
+            echo "$config_patterns"
+            echo "${delim_ip}"
+          } >> "$GITHUB_OUTPUT"
+
+          # Emit config_warning now so Upsert step can read it.
+          if [ -n "$config_warning" ]; then
+            echo "config_warning=${config_warning}" >> "$GITHUB_OUTPUT"
+          fi
+
+          # --- 4. Explicit /review or /review full bypasses the size guard. ---
           if [ -n "$MODE_INPUT" ] && [ "$MODE_INPUT" != "auto" ]; then
+            # Still compute filtered counts to log them; bypass the guard.
+            counts="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR/files" --paginate \
+              | jq -s 'add // []' \
+              | scope_filtered_counts "$patterns_file")"
+            filtered_files="$(grep '^files=' <<< "$counts" | cut -d= -f2-)"
+            filtered_lines="$(grep '^lines=' <<< "$counts" | cut -d= -f2-)"
+            echo "PR size (filtered): ${filtered_files} files, ${filtered_lines} lines (limits: ${max_files}/${max_lines}) — bypassed (explicit mode)"
+            if [ "$filtered_files" -gt "$max_files" ] || [ "$filtered_lines" -gt "$max_lines" ]; then
+              size_warning="⚠️ Large PR (${filtered_files} files / ${filtered_lines} lines) — token usage may be high."
+              echo "size_warning=${size_warning}" >> "$GITHUB_OUTPUT"
+            fi
             echo "skip=false" >> "$GITHUB_OUTPUT"
+            rm -f "$patterns_file"
             exit 0
           fi
-          size_json="$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" \
-            --json changedFiles,additions,deletions)"
-          changed_files="$(jq -r '.changedFiles' <<<"$size_json")"
-          diff_lines="$(jq -r '.additions + .deletions' <<<"$size_json")"
-          echo "PR size: ${changed_files} files, ${diff_lines} lines (limits: ${MAX_FILES}/${MAX_LINES})"
-          if [ "$changed_files" -gt "$MAX_FILES" ] || [ "$diff_lines" -gt "$MAX_LINES" ]; then
+
+          # --- 5. Auto mode: apply the guard. ---
+          counts="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR/files" --paginate \
+            | jq -s 'add // []' \
+            | scope_filtered_counts "$patterns_file")"
+          filtered_files="$(grep '^files=' <<< "$counts" | cut -d= -f2-)"
+          filtered_lines="$(grep '^lines=' <<< "$counts" | cut -d= -f2-)"
+          echo "PR size (filtered): ${filtered_files} files, ${filtered_lines} lines (limits: ${max_files}/${max_lines})"
+          rm -f "$patterns_file"
+
+          if [ "$filtered_files" -gt "$max_files" ] || [ "$filtered_lines" -gt "$max_lines" ]; then
             marker='<!-- ai-review:too-large -->'
             # shellcheck disable=SC2016  # literal backticks in markdown body
-            body="$(printf '%s\n\nai-review: PR too large for auto-review.\n\n**%s** files changed, **%s** lines changed (limit: **%s files / %s lines**).\n\nComment \`/review full\` to force a full review of this PR.' \
-              "$marker" "$changed_files" "$diff_lines" "$MAX_FILES" "$MAX_LINES")"
+            body="$(printf '%s\n\nai-review: PR too large for auto-review.\n\n**%s** filtered files changed, **%s** filtered lines changed (limit: **%s files / %s lines**).\n\nComment \`/review full\` to force a full review of this PR.' \
+              "$marker" "$filtered_files" "$filtered_lines" "$max_files" "$max_lines")"
             existing_id="$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
               | jq -rs --arg m "$marker" 'add | [.[] | select(.body | contains($m))] | last | .id // empty')"
             if [ -n "$existing_id" ]; then
@@ -278,6 +354,8 @@ jobs:
           STATE_JSON: ${{ steps.state.outputs.state_json }}
           TRIGGER_URL: ${{ inputs.trigger_url }}
           EVENT_ACTION: ${{ github.event.action }}
+          CONFIG_WARNING: ${{ steps.size_guard.outputs.config_warning }}
+          SIZE_WARNING: ${{ steps.size_guard.outputs.size_warning }}
         run: |
           set -euo pipefail
           marker="<!-- ai-review:ack -->"
@@ -301,8 +379,12 @@ jobs:
           fi
           state_line=""
           [ -n "$STATE_JSON" ] && state_line="<!-- ai-review:state $STATE_JSON -->"
-          body="$(printf '%s\n\n🔍 ai-review: **%s** review of %s in progress… (triggered by %s)\n\n%s' \
-            "$marker" "$MODE" "$range" "$trigger" "$state_line")"
+          # Append config_warning and size_warning before the state line when set.
+          extra_lines=""
+          [ -n "$CONFIG_WARNING" ] && extra_lines="${extra_lines}${CONFIG_WARNING}\n"
+          [ -n "$SIZE_WARNING" ] && extra_lines="${extra_lines}${SIZE_WARNING}\n"
+          body="$(printf '%s\n\n🔍 ai-review: **%s** review of %s in progress… (triggered by %s)\n\n%s%s' \
+            "$marker" "$MODE" "$range" "$trigger" "$extra_lines" "$state_line")"
           existing_id="$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
             | jq -rs --arg m "$marker" 'add | [.[] | select(.body | contains($m))] | last | .id // empty')"
           if [ -n "$existing_id" ]; then
@@ -493,12 +575,29 @@ jobs:
           category: ai-review-osv
 
       - name: Merge SARIF into findings.json
+        env:
+          IGNORE_PATTERNS: ${{ needs.gate.outputs.ignore_patterns }}
         run: |
           set -euo pipefail
           # shellcheck source=scripts/lib/sarif.sh
           . .ai-review-tooling/scripts/lib/sarif.sh
+          # shellcheck source=.ai-review-tooling/scripts/lib/scope.sh
+          . .ai-review-tooling/scripts/lib/scope.sh
           sarif_merge opengrep:opengrep.sarif gitleaks:gitleaks.sarif osv:osv.sarif > findings.json
-          jq length findings.json
+          before="$(jq length findings.json)"
+          echo "findings before filter: $before"
+          # Filter findings forwarded to the LLM using CONFIG patterns only
+          # (built-ins are about diff noise, not findings — a HIGH in a lockfile
+          # must still flow to the LLM). SARIF uploads above are untouched.
+          if [ -n "$IGNORE_PATTERNS" ]; then
+            config_pats_file="$(mktemp /tmp/findings-pats.XXXXXX)"
+            printf '%s\n' "$IGNORE_PATTERNS" > "$config_pats_file"
+            scope_filter_findings "$config_pats_file" < findings.json > findings.filtered.json
+            mv findings.filtered.json findings.json
+            rm -f "$config_pats_file"
+          fi
+          after="$(jq length findings.json)"
+          echo "findings after filter: $after"
 
       - name: Upload findings artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -563,11 +662,20 @@ jobs:
           BASE_REF: ${{ needs.gate.outputs.base_ref }}
           MODE: ${{ needs.gate.outputs.mode }}
           LAST_SHA: ${{ needs.gate.outputs.last_sha }}
+          IGNORE_PATTERNS: ${{ needs.gate.outputs.ignore_patterns }}
         run: |
           set -euo pipefail
           command -v rg >/dev/null || { echo "::error::ripgrep (rg) is not installed; impact map would be silently empty"; exit 1; }
-          # shellcheck source=scripts/lib/context.sh
+          # shellcheck source=.ai-review-tooling/scripts/lib/scope.sh
+          . .ai-review-tooling/scripts/lib/scope.sh
+          # shellcheck source=.ai-review-tooling/scripts/lib/context.sh
           . .ai-review-tooling/scripts/lib/context.sh
+          # Build patterns file: config patterns (from gate) + built-in patterns.
+          patterns_file="$(mktemp /tmp/context-patterns.XXXXXX)"
+          if [ -n "$IGNORE_PATTERNS" ]; then
+            printf '%s\n' "$IGNORE_PATTERNS" >> "$patterns_file"
+          fi
+          scope_builtin_ignores >> "$patterns_file"
           if [ "$MODE" = incremental ] && [ -n "$LAST_SHA" ] \
             && git cat-file -e "${LAST_SHA}^{commit}" 2>/dev/null; then
             range="${LAST_SHA}...HEAD"
@@ -575,7 +683,8 @@ jobs:
             range="origin/${BASE_REF}...HEAD"
           fi
           echo "Impact range: $range"
-          context_build_map "$range" > context.md
+          context_build_map "$range" "$patterns_file" > context.md
+          rm -f "$patterns_file"
           # Hard cap so a huge PR can't blow the prompt/token budget.
           head -c 60000 context.md > context.trunc && mv context.trunc context.md
           wc -c context.md
@@ -649,6 +758,7 @@ jobs:
           LAST_SHA: ${{ needs.gate.outputs.last_sha }}
           PR_NUMBER: ${{ needs.gate.outputs.pr }}
           HEAD_SHA: ${{ needs.gate.outputs.head_sha }}
+          IGNORE_PATTERNS: ${{ needs.gate.outputs.ignore_patterns }}
         run: |
           set -euo pipefail
           # Force-push can make the previously reviewed SHA unreachable; the
@@ -656,15 +766,29 @@ jobs:
           # the full playbook with a blank LAST_SHA in that case.
           # shellcheck source=scripts/lib/reconcile.sh
           . .ai-review-tooling/scripts/lib/reconcile.sh
+          # shellcheck source=.ai-review-tooling/scripts/lib/scope.sh
+          . .ai-review-tooling/scripts/lib/scope.sh
           eff="$(reconcile_effective_baseline "$MODE" "$LAST_SHA")"
           effective_mode="$(sed -n 's/^mode=//p' <<<"$eff")"
           effective_last_sha="$(sed -n 's/^last_sha=//p' <<<"$eff")"
           if [ "$effective_mode" != "$MODE" ]; then
             echo "Baseline $LAST_SHA unreachable (force-push?); falling back to full review."
           fi
+          # Compute IGNORE_PATHSPECS from config patterns (space-joined, single-quoted).
+          ignore_pathspecs=""
+          if [ -n "$IGNORE_PATTERNS" ]; then
+            pats_file="$(mktemp /tmp/prompt-pats.XXXXXX)"
+            printf '%s\n' "$IGNORE_PATTERNS" > "$pats_file"
+            while IFS= read -r spec; do
+              ignore_pathspecs="${ignore_pathspecs}'${spec}' "
+            done < <(scope_exclude_pathspecs "$pats_file")
+            rm -f "$pats_file"
+            ignore_pathspecs="${ignore_pathspecs% }"  # trim trailing space
+          fi
           {
             echo "effective_last_sha=$effective_last_sha"
             echo "effective_mode=$effective_mode"
+            echo "ignore_pathspecs=${ignore_pathspecs}"
           } >> "$GITHUB_OUTPUT"
           if [ "$effective_mode" = "incremental" ]; then
             playbook=".ai-review-tooling/prompts/review-incremental.md"
@@ -688,6 +812,7 @@ jobs:
             printf -- '- Prior review id: env `PRIOR_REVIEW_ID` (may be empty)\n'
             printf -- '- Status comment id: env `STATUS_COMMENT_ID`\n'
             printf -- '- Trigger description: env `TRIGGER_DESC`\n'
+            printf -- '- Ignored pathspecs: env `IGNORE_PATHSPECS` (may be empty)\n'
           } > "$RUNNER_TEMP/prompt.md"
           delim="PROMPT_EOF_$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
           {
@@ -769,6 +894,9 @@ jobs:
           REVIEW_MODE: ${{ steps.prompt.outputs.effective_mode }}
           GITHUB_BASE_REF: ${{ needs.gate.outputs.base_ref }}
           PR_NUMBER: ${{ needs.gate.outputs.pr }}
+          # Space-joined single-quoted :(exclude) pathspecs for git diff.
+          # Empty when no config ignore patterns are set.
+          IGNORE_PATHSPECS: ${{ steps.prompt.outputs.ignore_pathspecs }}
 
       # opencode's runner always posts its final chat response as a PR comment
       # (hardcoded in `opencode github run`). The review + sticky status

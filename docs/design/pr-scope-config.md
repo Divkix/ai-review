@@ -1,3 +1,5 @@
+Status: implemented (v0.2.0) — see README Per-repo configuration.
+
 # Design: PR scope configuration — diff-size guard and per-repo path filters
 
 **Status**: spike (2026-06-12, commit `7d232b5`)
