@@ -44,7 +44,7 @@ jobs:
         run: actionlint -color .github/workflows/*.yml
 
       - name: Lint standalone shell scripts
-        run: shellcheck scripts/check-pins.sh scripts/lib/reconcile.sh
+        run: shellcheck scripts/check-pins.sh scripts/release.sh scripts/lib/reconcile.sh
 
   pins:
     name: pin consistency + live sha256
