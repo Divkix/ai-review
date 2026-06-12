@@ -66,6 +66,14 @@ on:
         description: "Model reasoning-effort variant (opencode maps this to reasoningEffort where the model defines variants)"
         type: string
         default: max
+      verifier_model:
+        description: "LLM model id for the skeptic/verifier pass (defaults to inputs.model when empty)"
+        type: string
+        default: ''
+      verifier_variant:
+        description: "Reasoning-effort variant for the verifier pass (defaults to inputs.variant when empty)"
+        type: string
+        default: ''
       api_key_env:
         description: "Env-var name the chosen provider expects for its API key (e.g. OPENAI_API_KEY)"
         type: string
@@ -707,10 +715,14 @@ jobs:
       # so its token must not be able to push code. contents:read still allows
       # authenticated fetches. The contents:write needed by GitHub's
       # resolveReviewThread mutation lives in the deterministic finalize job,
-      # which runs no LLM.
+      # which runs no LLM. GitHub tokens are NOT passed to the opencode drafter
+      # or skeptic steps; only the posting step receives github.token.
       contents: read
       pull-requests: write
       issues: write
+    outputs:
+      verdict: ${{ steps.post.outputs.verdict }}
+      intended_verdict: ${{ steps.post.outputs.intended_verdict }}
     steps:
       - name: Checkout PR head (caller repo)
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -719,15 +731,12 @@ jobs:
           # push between gate and checkout can't swap in unreviewed code.
           ref: ${{ needs.gate.outputs.head_sha }}
           fetch-depth: 0
-          # Keep credentials so the agent's git fetch/diff work on private
-          # repos; the token is contents:read, so a push (e.g. opencode's
-          # trailing push, or a prompt-injected one) fails with 403. The tree
-          # is kept clean (see "Prepare working tree for opencode") so the
-          # trailing push doesn't fire at all.
-          persist-credentials: true
+          # No persisted credentials: the LLM agents have no GitHub token and
+          # cannot push. The posting step uses github.token directly via gh.
+          persist-credentials: false
 
       # Bump ref when releasing v2 of divkix/ai-review.
-      - name: Checkout ai-review tooling (prompts)
+      - name: Checkout ai-review tooling (prompts + lib)
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           repository: divkix/ai-review
@@ -748,24 +757,90 @@ jobs:
       - name: Fetch base ref
         env:
           BASE_REF: ${{ needs.gate.outputs.base_ref }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # Checkout persists credentials, so origin is already authenticated.
-          git fetch origin "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+          git -c "http.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')" \
+            fetch origin "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
 
-      - name: Compose review prompt
+      - name: Fetch live review threads
+        id: threads
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ needs.gate.outputs.pr }}
+        run: |
+          set -euo pipefail
+          owner="${GITHUB_REPOSITORY%/*}"
+          repo="${GITHUB_REPOSITORY#*/}"
+          threads_out="$RUNNER_TEMP/threads.json"
+          # Paginated cursor loop — do NOT use a single last:100.
+          cursor=""
+          all_nodes='[]'
+          while true; do
+            if [ -n "$cursor" ]; then
+              # shellcheck disable=SC2016  # $owner/$repo/$number are GraphQL vars, not shell
+              page_result="$(gh api graphql \
+                -f query='
+                  query($owner: String!, $repo: String!, $number: Int!, $after: String) {
+                    repository(owner: $owner, name: $repo) {
+                      pullRequest(number: $number) {
+                        reviewThreads(first: 50, after: $after) {
+                          nodes {
+                            id
+                            isResolved
+                            comments(first: 1) {
+                              nodes { path body databaseId }
+                            }
+                          }
+                          pageInfo { hasNextPage endCursor }
+                        }
+                      }
+                    }
+                  }' \
+                -f owner="$owner" -f repo="$repo" -F number="$PR_NUMBER" -f after="$cursor" \
+                2>&1)" || { echo "::warning::Thread fetch failed (cursor=$cursor); using threads so far."; break; }
+            else
+              # shellcheck disable=SC2016  # $owner/$repo/$number are GraphQL vars, not shell
+              page_result="$(gh api graphql \
+                -f query='
+                  query($owner: String!, $repo: String!, $number: Int!) {
+                    repository(owner: $owner, name: $repo) {
+                      pullRequest(number: $number) {
+                        reviewThreads(first: 50) {
+                          nodes {
+                            id
+                            isResolved
+                            comments(first: 1) {
+                              nodes { path body databaseId }
+                            }
+                          }
+                          pageInfo { hasNextPage endCursor }
+                        }
+                      }
+                    }
+                  }' \
+                -f owner="$owner" -f repo="$repo" -F number="$PR_NUMBER" \
+                2>&1)" || { echo "::warning::Thread fetch failed (initial); writing []."; break; }
+            fi
+            nodes="$(jq '.data.repository.pullRequest.reviewThreads.nodes // []' <<<"$page_result")"
+            all_nodes="$(jq -n --argjson a "$all_nodes" --argjson b "$nodes" '$a + $b')"
+            has_next="$(jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage // "false"' <<<"$page_result")"
+            cursor="$(jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.endCursor // ""' <<<"$page_result")"
+            if [ "$has_next" != "true" ] || [ -z "$cursor" ]; then break; fi
+          done
+          printf '%s\n' "$all_nodes" > "$threads_out" || printf '[]' > "$threads_out"
+          echo "threads_path=$threads_out" >> "$GITHUB_OUTPUT"
+          echo "Fetched $(jq length "$threads_out") thread(s)"
+
+      - name: Compose prompts and resolve baseline
         id: prompt
         env:
           MODE: ${{ needs.gate.outputs.mode }}
           LAST_SHA: ${{ needs.gate.outputs.last_sha }}
-          PR_NUMBER: ${{ needs.gate.outputs.pr }}
           HEAD_SHA: ${{ needs.gate.outputs.head_sha }}
           IGNORE_PATTERNS: ${{ needs.gate.outputs.ignore_patterns }}
         run: |
           set -euo pipefail
-          # Force-push can make the previously reviewed SHA unreachable; the
-          # incremental playbook would then diff against nothing. Fall back to
-          # the full playbook with a blank LAST_SHA in that case.
           # shellcheck source=scripts/lib/reconcile.sh
           . .ai-review-tooling/scripts/lib/reconcile.sh
           # shellcheck source=.ai-review-tooling/scripts/lib/scope.sh
@@ -792,54 +867,52 @@ jobs:
             echo "effective_mode=$effective_mode"
             echo "ignore_pathspecs=${ignore_pathspecs}"
           } >> "$GITHUB_OUTPUT"
+
+          # Output paths: drafter writes here, verifier writes here.
+          mkdir -p "$GITHUB_WORKSPACE/.ai-review-out"
+          draft_path="$GITHUB_WORKSPACE/.ai-review-out/draft.json"
+          verified_path="$GITHUB_WORKSPACE/.ai-review-out/verified.json"
+          echo "draft_path=$draft_path" >> "$GITHUB_OUTPUT"
+          echo "verified_path=$verified_path" >> "$GITHUB_OUTPUT"
+
           if [ "$effective_mode" = "incremental" ]; then
             playbook=".ai-review-tooling/prompts/review-incremental.md"
           else
             playbook=".ai-review-tooling/prompts/review-full.md"
           fi
-          # shellcheck disable=SC2016  # literal backticks in the prompt text
-          {
-            cat "$playbook"
-            printf '\n\n'
-            cat ".ai-review-tooling/prompts/review-common.md"
-            printf '\n## Run context\n\n'
-            printf -- '- Repository: %s\n' "$GITHUB_REPOSITORY"
-            printf -- '- PR number: %s (also in env `PR_NUMBER`)\n' "$PR_NUMBER"
-            printf -- '- Head SHA: %s (also in env `HEAD_SHA`)\n' "$HEAD_SHA"
-            printf -- '- Base ref: env `GITHUB_BASE_REF`\n'
-            printf -- '- Static findings file: path in env `FINDINGS_PATH`\n'
-            printf -- '- Impact map file: path in env `CONTEXT_PATH`\n'
-            printf -- '- Last reviewed SHA: env `LAST_SHA` (empty on full review)\n'
-            printf -- '- Prior state JSON: env `PRIOR_STATE_JSON` (may be empty)\n'
-            printf -- '- Prior review id: env `PRIOR_REVIEW_ID` (may be empty)\n'
-            printf -- '- Status comment id: env `STATUS_COMMENT_ID`\n'
-            printf -- '- Trigger description: env `TRIGGER_DESC`\n'
-            printf -- '- Ignored pathspecs: env `IGNORE_PATHSPECS` (may be empty)\n'
-          } > "$RUNNER_TEMP/prompt.md"
-          delim="PROMPT_EOF_$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
-          {
-            echo "prompt<<$delim"
-            cat "$RUNNER_TEMP/prompt.md"
-            echo "$delim"
-          } >> "$GITHUB_OUTPUT"
 
-      # opencode's runner ends each session by checking `git status` and, if the
-      # tree is dirty, committing everything and pushing it onto the PR branch.
-      # Our injected tooling checkout and findings file are untracked, so without
-      # this they'd be committed into the user's PR and the push would need write
-      # access (and fail with 403 on a read-only review job). Hiding them via
-      # .git/info/exclude keeps the tree clean so opencode skips the push.
-      # An identity is still set so any unexpected commit doesn't abort the run.
-      - name: Prepare working tree for opencode
-        run: |
-          set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898024+github-actions[bot]@users.noreply.github.com"
-          {
-            echo '.ai-review-tooling/'
-            echo 'findings.json'
-            echo 'context.md'
-          } >> "$(git rev-parse --git-dir)/info/exclude"
+          # Drafter prompt: mode playbook + shared protocol, substituting only
+          # the explicit var list so code examples with other $ text are untouched.
+          # shellcheck disable=SC2016  # literal $VAR in envsubst var list
+          DRAFT_PATH="$draft_path" \
+          VERIFIED_PATH="$verified_path" \
+          THREADS_PATH="${{ steps.threads.outputs.threads_path }}" \
+          FINDINGS_PATH="$GITHUB_WORKSPACE/findings.json" \
+          CONTEXT_PATH="$GITHUB_WORKSPACE/context.md" \
+          REVIEW_MODE="$effective_mode" \
+          LAST_SHA="$effective_last_sha" \
+          HEAD_SHA="$HEAD_SHA" \
+          PRIOR_STATE_JSON="${{ needs.gate.outputs.state_json }}" \
+          IGNORE_PATHSPECS="$ignore_pathspecs" \
+          envsubst '$GITHUB_BASE_REF $HEAD_SHA $LAST_SHA $REVIEW_MODE $FINDINGS_PATH $CONTEXT_PATH $IGNORE_PATHSPECS $DRAFT_PATH $VERIFIED_PATH $THREADS_PATH $PRIOR_STATE_JSON' \
+            < <(cat "$playbook"; printf '\n\n'; cat ".ai-review-tooling/prompts/review-common.md") \
+            > "$RUNNER_TEMP/prompt-draft.md"
+
+          # Verifier prompt: verify playbook only, same substitution.
+          # shellcheck disable=SC2016  # literal $VAR in envsubst var list
+          DRAFT_PATH="$draft_path" \
+          VERIFIED_PATH="$verified_path" \
+          THREADS_PATH="${{ steps.threads.outputs.threads_path }}" \
+          FINDINGS_PATH="$GITHUB_WORKSPACE/findings.json" \
+          CONTEXT_PATH="$GITHUB_WORKSPACE/context.md" \
+          REVIEW_MODE="$effective_mode" \
+          LAST_SHA="$effective_last_sha" \
+          HEAD_SHA="$HEAD_SHA" \
+          PRIOR_STATE_JSON="${{ needs.gate.outputs.state_json }}" \
+          IGNORE_PATHSPECS="$ignore_pathspecs" \
+          envsubst '$GITHUB_BASE_REF $HEAD_SHA $LAST_SHA $REVIEW_MODE $FINDINGS_PATH $CONTEXT_PATH $IGNORE_PATHSPECS $DRAFT_PATH $VERIFIED_PATH $THREADS_PATH $PRIOR_STATE_JSON' \
+            < ".ai-review-tooling/prompts/review-verify.md" \
+            > "$RUNNER_TEMP/prompt-verify.md"
 
       # Pinned CLI instead of the upstream wrapper action: the wrapper
       # installs whatever the LATEST opencode release is at runtime
@@ -848,8 +921,8 @@ jobs:
       - name: Install opencode (pinned)
         run: |
           set -euo pipefail
-          OPENCODE_VERSION="1.17.3"
-          OPENCODE_SHA256="d4bd238a2c1ff56aca1cd3397d21a0a317f5992234517a7f8e2afbbd72010a7d"
+          OPENCODE_VERSION="1.17.4"
+          OPENCODE_SHA256="a2ece9181aab3817a6b59fa390b6d459b187e3ec917be802ecbca88b632c5ef9"
           curl -fsSL -o /tmp/opencode.tar.gz \
             "https://github.com/anomalyco/opencode/releases/download/v${OPENCODE_VERSION}/opencode-linux-x64.tar.gz"
           echo "${OPENCODE_SHA256}  /tmp/opencode.tar.gz" | sha256sum -c -
@@ -870,61 +943,429 @@ jobs:
           fi
           echo "${API_KEY_ENV}=${LLM_API_KEY}" >> "$GITHUB_ENV"
 
-      - name: Run LLM review
-        run: opencode github run
+      - name: Run drafter
         env:
           MODEL: ${{ inputs.model }}
-          # opencode maps VARIANT to the model's reasoningEffort where the model
-          # defines variants; config-file options are not loaded on this path,
-          # so the variant must be set here.
           VARIANT: ${{ inputs.variant }}
-          USE_GITHUB_TOKEN: 'true'
-          SHARE: 'false'
-          PROMPT: ${{ steps.prompt.outputs.prompt }}
-          GITHUB_TOKEN: ${{ github.token }}
-          GH_TOKEN: ${{ github.token }}
+          # OPENCODE_CONFIG_CONTENT overrides any opencode.json/.opencode in the
+          # PR's working tree — this is the security point: a PR cannot weaken
+          # drafter permissions by committing its own opencode config.
+          # No GitHub tokens here; agents have no posting permissions.
+          OPENCODE_CONFIG_CONTENT: >-
+            {
+              "share": "disabled",
+              "agents": {
+                "drafter": {
+                  "permission": {
+                    "*": "deny",
+                    "read": "allow",
+                    "glob": "allow",
+                    "list": "allow",
+                    "grep": "allow",
+                    "bash": {"*": "deny", "git diff*": "allow", "git log*": "allow", "git show*": "allow", "git cat-file*": "allow"},
+                    "edit": {"*": "deny", "**/.ai-review-out/draft.json": "allow"},
+                    "webfetch": "deny",
+                    "websearch": "deny"
+                  }
+                },
+                "skeptic": {
+                  "permission": {
+                    "*": "deny",
+                    "read": "allow",
+                    "glob": "allow",
+                    "list": "allow",
+                    "grep": "allow",
+                    "bash": "allow",
+                    "edit": {"*": "deny", "**/.ai-review-out/verified.json": "allow"},
+                    "webfetch": "deny",
+                    "websearch": "deny"
+                  }
+                }
+              }
+            }
+          DRAFT_PATH: ${{ steps.prompt.outputs.draft_path }}
+          VERIFIED_PATH: ${{ steps.prompt.outputs.verified_path }}
+          THREADS_PATH: ${{ steps.threads.outputs.threads_path }}
           FINDINGS_PATH: ${{ github.workspace }}/findings.json
           CONTEXT_PATH: ${{ github.workspace }}/context.md
           HEAD_SHA: ${{ needs.gate.outputs.head_sha }}
-          # Effective value: blanked when the baseline commit is unreachable
-          # (see "Compose review prompt").
           LAST_SHA: ${{ steps.prompt.outputs.effective_last_sha }}
           PRIOR_STATE_JSON: ${{ needs.gate.outputs.state_json }}
-          PRIOR_REVIEW_ID: ${{ needs.gate.outputs.prior_review_id }}
-          STATUS_COMMENT_ID: ${{ needs.gate.outputs.ack_comment_id }}
-          TRIGGER_DESC: ${{ needs.gate.outputs.trigger_desc }}
           REVIEW_MODE: ${{ steps.prompt.outputs.effective_mode }}
           GITHUB_BASE_REF: ${{ needs.gate.outputs.base_ref }}
           PR_NUMBER: ${{ needs.gate.outputs.pr }}
-          # Space-joined single-quoted :(exclude) pathspecs for git diff.
-          # Empty when no config ignore patterns are set.
           IGNORE_PATHSPECS: ${{ steps.prompt.outputs.ignore_pathspecs }}
-          # Gate warnings (size-guard bypass, malformed config). The playbook
-          # carries them into the final status comment; without this the LLM's
-          # rewrite would drop the ⚠️ lines the ack step showed mid-run (#22).
-          SIZE_WARNING: ${{ needs.gate.outputs.size_warning }}
-          CONFIG_WARNING: ${{ needs.gate.outputs.config_warning }}
+        run: |
+          set -euo pipefail
+          opencode run -m "$MODEL" ${VARIANT:+--variant "$VARIANT"} \
+            --agent drafter \
+            --title "ai-review drafter $HEAD_SHA" \
+            < "$RUNNER_TEMP/prompt-draft.md"
 
-      # opencode's runner always posts its final chat response as a PR comment
-      # (hardcoded in `opencode github run`). The review + sticky status
-      # comment already carry everything, so delete it; it is identifiable by
-      # the "[github run](…/actions/runs/<id>)" footer pointing at THIS run.
-      # On failure we keep it — it may carry useful error context.
-      - name: Delete opencode auto-comment
+      - name: Validate draft (with bounded retry)
+        env:
+          DRAFT_PATH: ${{ steps.prompt.outputs.draft_path }}
+          MODEL: ${{ inputs.model }}
+          VARIANT: ${{ inputs.variant }}
+          OPENCODE_CONFIG_CONTENT: >-
+            {
+              "share": "disabled",
+              "agents": {
+                "drafter": {
+                  "permission": {
+                    "*": "deny",
+                    "read": "allow",
+                    "glob": "allow",
+                    "list": "allow",
+                    "grep": "allow",
+                    "bash": {"*": "deny", "git diff*": "allow", "git log*": "allow", "git show*": "allow", "git cat-file*": "allow"},
+                    "edit": {"*": "deny", "**/.ai-review-out/draft.json": "allow"},
+                    "webfetch": "deny",
+                    "websearch": "deny"
+                  }
+                }
+              }
+            }
+        run: |
+          set -euo pipefail
+          validate_draft() {
+            jq -e 'type=="object"
+              and (.walkthrough | type == "string")
+              and (.findings | type == "array")
+              and (.mode == "full" or .mode == "incremental")' "$DRAFT_PATH" > /dev/null 2>&1
+          }
+          attempt=0
+          while ! validate_draft; do
+            attempt=$((attempt + 1))
+            if [ "$attempt" -gt 2 ]; then
+              echo "::error::draft.json failed validation after $attempt attempts"
+              exit 1
+            fi
+            jq_err="$(jq -e 'type=="object" and (.walkthrough|type=="string") and (.findings|type=="array") and (.mode=="full" or .mode=="incremental")' "$DRAFT_PATH" 2>&1 || true)"
+            fix_msg="The draft.json you wrote failed JSON schema validation. Fix it and overwrite $DRAFT_PATH. Error: $jq_err. Required: object with string walkthrough, array findings, and mode=full|incremental."
+            echo "::warning::Draft validation failed (attempt $attempt); retrying with fix instruction"
+            printf '%s\n' "$fix_msg" | opencode run -c -m "$MODEL" ${VARIANT:+--variant "$VARIANT"} --agent drafter
+          done
+          echo "Draft validated OK"
+
+      - name: Run skeptic (verifier)
+        env:
+          MODEL: ${{ inputs.verifier_model != '' && inputs.verifier_model || inputs.model }}
+          VARIANT: ${{ inputs.verifier_variant != '' && inputs.verifier_variant || inputs.variant }}
+          OPENCODE_CONFIG_CONTENT: >-
+            {
+              "share": "disabled",
+              "agents": {
+                "skeptic": {
+                  "permission": {
+                    "*": "deny",
+                    "read": "allow",
+                    "glob": "allow",
+                    "list": "allow",
+                    "grep": "allow",
+                    "bash": "allow",
+                    "edit": {"*": "deny", "**/.ai-review-out/verified.json": "allow"},
+                    "webfetch": "deny",
+                    "websearch": "deny"
+                  }
+                }
+              }
+            }
+          DRAFT_PATH: ${{ steps.prompt.outputs.draft_path }}
+          VERIFIED_PATH: ${{ steps.prompt.outputs.verified_path }}
+          THREADS_PATH: ${{ steps.threads.outputs.threads_path }}
+          FINDINGS_PATH: ${{ github.workspace }}/findings.json
+          CONTEXT_PATH: ${{ github.workspace }}/context.md
+          HEAD_SHA: ${{ needs.gate.outputs.head_sha }}
+          LAST_SHA: ${{ steps.prompt.outputs.effective_last_sha }}
+          PRIOR_STATE_JSON: ${{ needs.gate.outputs.state_json }}
+          REVIEW_MODE: ${{ steps.prompt.outputs.effective_mode }}
+          GITHUB_BASE_REF: ${{ needs.gate.outputs.base_ref }}
+          PR_NUMBER: ${{ needs.gate.outputs.pr }}
+          IGNORE_PATHSPECS: ${{ steps.prompt.outputs.ignore_pathspecs }}
+        run: |
+          set -euo pipefail
+          opencode run -m "$MODEL" ${VARIANT:+--variant "$VARIANT"} \
+            --agent skeptic \
+            --title "ai-review skeptic $HEAD_SHA" \
+            < "$RUNNER_TEMP/prompt-verify.md"
+
+      - name: Normalize and validate verified.json
+        env:
+          VERIFIED_PATH: ${{ steps.prompt.outputs.verified_path }}
+        run: |
+          set -euo pipefail
+          # Normalize optional arrays the verifier may have omitted.
+          jq '.rejected //= [] | .prior //= [] | .dropped_static //= []' "$VERIFIED_PATH" \
+            > "$VERIFIED_PATH.tmp" && mv "$VERIFIED_PATH.tmp" "$VERIFIED_PATH"
+          jq -e 'type=="object"
+            and (.walkthrough | type == "string")
+            and (.findings | type == "array")
+            and (.mode == "full" or .mode == "incremental")
+            and (.rejected | type == "array")' "$VERIFIED_PATH" > /dev/null \
+            || { echo "::error::verified.json failed schema validation"; exit 1; }
+          echo "Verified.json validated OK"
+
+      - name: Post review and update status comment
+        id: post
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ needs.gate.outputs.pr }}
+          HEAD_SHA: ${{ needs.gate.outputs.head_sha }}
+          LAST_SHA: ${{ steps.prompt.outputs.effective_last_sha }}
+          REVIEW_MODE: ${{ steps.prompt.outputs.effective_mode }}
+          GITHUB_BASE_REF: ${{ needs.gate.outputs.base_ref }}
+          STATUS_COMMENT_ID: ${{ needs.gate.outputs.ack_comment_id }}
+          TRIGGER_DESC: ${{ needs.gate.outputs.trigger_desc }}
+          SIZE_WARNING: ${{ needs.gate.outputs.size_warning }}
+          CONFIG_WARNING: ${{ needs.gate.outputs.config_warning }}
+          IGNORE_PATHSPECS: ${{ steps.prompt.outputs.ignore_pathspecs }}
+          VERIFIED_PATH: ${{ steps.prompt.outputs.verified_path }}
+          THREADS_PATH: ${{ steps.threads.outputs.threads_path }}
+          PRIOR_STATE_JSON: ${{ needs.gate.outputs.state_json }}
         run: |
           set -euo pipefail
-          gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" --paginate \
-            | jq -rs --arg run "actions/runs/$GITHUB_RUN_ID" 'add
-                | [.[] | select(.user.type == "Bot"
-                    and (.user.login | startswith("github-actions"))
-                    and (.body | contains($run)))]
-                | .[].id' \
-            | while IFS= read -r cid; do
-                [ -n "$cid" ] && gh api -X DELETE "repos/$GITHUB_REPOSITORY/issues/comments/$cid"
-              done
+          # shellcheck source=.ai-review-tooling/scripts/lib/post.sh
+          . .ai-review-tooling/scripts/lib/post.sh
+
+          # --- 1. Fingerprint findings -----------------------------------------
+          post_finding_fingerprints < "$VERIFIED_PATH" > "$RUNNER_TEMP/verified-fp.json"
+
+          # --- 2. Budget selection ---------------------------------------------
+          budget_json="$(post_select_budget < "$RUNNER_TEMP/verified-fp.json")"
+          inline_candidates="$(jq -c '.inline' <<<"$budget_json")"
+          minors_from_budget="$(jq -c '.minors' <<<"$budget_json")"
+
+          # --- 3. Build the anchor diff ----------------------------------------
+          diff_file="$RUNNER_TEMP/review.diff"
+          if [ "$REVIEW_MODE" = "incremental" ] && [ -n "$LAST_SHA" ]; then
+            # shellcheck disable=SC2086  # IGNORE_PATHSPECS intentionally word-splits
+            git diff "${LAST_SHA}...${HEAD_SHA}" ${IGNORE_PATHSPECS:+-- $IGNORE_PATHSPECS} > "$diff_file" || true
+          else
+            # shellcheck disable=SC2086
+            git diff "origin/${GITHUB_BASE_REF}...HEAD" ${IGNORE_PATHSPECS:+-- $IGNORE_PATHSPECS} > "$diff_file" || true
+          fi
+
+          # --- 4. Validate anchors ---------------------------------------------
+          anchor_result="$(post_validate_anchors "$diff_file" <<<"$inline_candidates")"
+          valid_inline="$(jq -c '.valid' <<<"$anchor_result")"
+          demoted="$(jq -c '.demoted' <<<"$anchor_result")"
+
+          # Demoted + budget minors both go into the final minors block.
+          all_minors="$(jq -n --argjson d "$demoted" --argjson m "$minors_from_budget" '$d + $m')"
+
+          # --- 5. Derive verdict -----------------------------------------------
+          verdict="$(post_derive_verdict < "$RUNNER_TEMP/verified-fp.json")"
+          intended_verdict="$verdict"
+
+          # --- 6. Compose review payload ---------------------------------------
+          dropped_static="$(jq -c '.dropped_static // []' "$RUNNER_TEMP/verified-fp.json")"
+          rejected="$(jq -c '.rejected // []' "$RUNNER_TEMP/verified-fp.json")"
+          walkthrough="$(jq -r '.walkthrough // ""' "$RUNNER_TEMP/verified-fp.json")"
+          compose_input="$(jq -n \
+            --arg w "$walkthrough" \
+            --argjson inline "$valid_inline" \
+            --argjson minors "$all_minors" \
+            --argjson ds "$dropped_static" \
+            --argjson rej "$rejected" \
+            '{"walkthrough":$w,"inline":$inline,"minors":$minors,"dropped_static":$ds,"rejected":$rej}')"
+          post_compose_review "$verdict" <<<"$compose_input" > "$RUNNER_TEMP/review.json"
+
+          # --- 7. POST the review ----------------------------------------------
+          event_used="$verdict"
+          http_code="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" \
+            --input "$RUNNER_TEMP/review.json" \
+            -w "%{http_code}" -o "$RUNNER_TEMP/review-resp.json" 2>&1)" || http_code="$?"
+          if [ "$http_code" != "200" ]; then
+            echo "::warning::Review POST returned HTTP $http_code; attempting fallback"
+            # Fallback 1: if APPROVE was intended but forbidden, post as COMMENT
+            if [ "$verdict" = "APPROVE" ]; then
+              post_compose_review "COMMENT" <<<"$compose_input" > "$RUNNER_TEMP/review-fallback.json"
+              # Prepend approval notice to body
+              orig_body="$(jq -r '.body' "$RUNNER_TEMP/review-fallback.json")"
+              new_body="$(printf '**Verdict: APPROVE** — posted as a comment because this repository does not allow GitHub Actions to approve pull requests.\n\n%s' "$orig_body")"
+              jq --arg b "$new_body" '.body = $b' "$RUNNER_TEMP/review-fallback.json" > "$RUNNER_TEMP/review-fb2.json"
+              event_used="COMMENT"
+              gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" \
+                --input "$RUNNER_TEMP/review-fb2.json" \
+                -o "$RUNNER_TEMP/review-resp.json" || {
+                  echo "::error::Review fallback (COMMENT) also failed"; exit 1
+                }
+            else
+              # Fallback 2: 422 anchor error — degrade to no inline comments
+              degrade_input="$(jq -n \
+                --arg w "$walkthrough" \
+                --argjson minors "$(jq -n --argjson v "$valid_inline" --argjson m "$all_minors" '$v + $m')" \
+                --argjson ds "$dropped_static" \
+                --argjson rej "$rejected" \
+                '{"walkthrough":$w,"inline":[],"minors":$minors,"dropped_static":$ds,"rejected":$rej}')"
+              post_compose_review "$verdict" <<<"$degrade_input" > "$RUNNER_TEMP/review-degrade.json"
+              gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" \
+                --input "$RUNNER_TEMP/review-degrade.json" \
+                -o "$RUNNER_TEMP/review-resp.json" || {
+                  echo "::error::Review degraded POST also failed"; exit 1
+                }
+            fi
+          fi
+
+          # --- 8. Re-fetch threads and match posted comments -------------------
+          owner="${GITHUB_REPOSITORY%/*}"
+          repo_name="${GITHUB_REPOSITORY#*/}"
+          cursor2=""
+          all_nodes2='[]'
+          while true; do
+            if [ -n "$cursor2" ]; then
+              # shellcheck disable=SC2016  # $owner/$repo/$number are GraphQL vars, not shell
+              page2="$(gh api graphql \
+                -f query='
+                  query($owner: String!, $repo: String!, $number: Int!, $after: String) {
+                    repository(owner: $owner, name: $repo) {
+                      pullRequest(number: $number) {
+                        reviewThreads(first: 50, after: $after) {
+                          nodes {
+                            id
+                            isResolved
+                            comments(first: 1) {
+                              nodes { path body databaseId }
+                            }
+                          }
+                          pageInfo { hasNextPage endCursor }
+                        }
+                      }
+                    }
+                  }' \
+                -f owner="$owner" -f repo="$repo_name" -F number="$PR_NUMBER" -f after="$cursor2" \
+                2>&1)" || { echo "::warning::Post-review thread fetch failed; thread matching may be incomplete."; break; }
+            else
+              # shellcheck disable=SC2016  # $owner/$repo/$number are GraphQL vars, not shell
+              page2="$(gh api graphql \
+                -f query='
+                  query($owner: String!, $repo: String!, $number: Int!) {
+                    repository(owner: $owner, name: $repo) {
+                      pullRequest(number: $number) {
+                        reviewThreads(first: 50) {
+                          nodes {
+                            id
+                            isResolved
+                            comments(first: 1) {
+                              nodes { path body databaseId }
+                            }
+                          }
+                          pageInfo { hasNextPage endCursor }
+                        }
+                      }
+                    }
+                  }' \
+                -f owner="$owner" -f repo="$repo_name" -F number="$PR_NUMBER" \
+                2>&1)" || { echo "::warning::Post-review thread fetch failed; thread matching may be incomplete."; break; }
+            fi
+            nodes2="$(jq '.data.repository.pullRequest.reviewThreads.nodes // []' <<<"$page2")"
+            all_nodes2="$(jq -n --argjson a "$all_nodes2" --argjson b "$nodes2" '$a + $b')"
+            has_next2="$(jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage // "false"' <<<"$page2")"
+            cursor2="$(jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.endCursor // ""' <<<"$page2")"
+            if [ "$has_next2" != "true" ] || [ -z "$cursor2" ]; then break; fi
+          done
+          printf '%s\n' "$all_nodes2" > "$RUNNER_TEMP/threads-post.json"
+
+          # Match posted inline comments to thread IDs.
+          # The review response contains the comments array.
+          jq '[.comments // [] | .[] | {path: .path, body: .body}]' \
+            "$RUNNER_TEMP/review-resp.json" > "$RUNNER_TEMP/posted-comments.json" 2>/dev/null \
+            || printf '[]' > "$RUNNER_TEMP/posted-comments.json"
+          matched="$(post_match_threads "$RUNNER_TEMP/posted-comments.json" "$RUNNER_TEMP/threads-post.json")"
+
+          # --- 9. Build state findings array -----------------------------------
+          # Prior unfixed entries from the verified output.
+          prior_unfixed="$(jq -c '[.prior // [] | .[] | select(.status == "unfixed") | {
+            threadId: .threadId,
+            file: .path,
+            fingerprint: (.fingerprint // null),
+            severity: (.severity // null)
+          }]' "$RUNNER_TEMP/verified-fp.json")"
+
+          # Posted inline findings matched to threadIds.
+          posted_findings="$(jq -n \
+            --argjson inline "$valid_inline" \
+            --argjson matched "$matched" \
+            '[range($inline | length) as $i |
+              ($inline[$i]) as $f |
+              ($matched | map(select(.path == $f.path and .body == $f.body)) | first // {"threadId": null}) as $m |
+              {
+                threadId: $m.threadId,
+                file: $f.path,
+                fingerprint: ($f.fingerprint // null),
+                severity: ($f.severity // null)
+              }]')"
+
+          # On APPROVE with nothing unfixed, state findings = []
+          if [ "$intended_verdict" = "APPROVE" ]; then
+            state_findings='[]'
+          else
+            state_findings="$(jq -n --argjson p "$prior_unfixed" --argjson n "$posted_findings" '$p + $n')"
+          fi
+
+          # --- 10. Compose state marker and update sticky comment --------------
+          state_marker="$(post_compose_state "$HEAD_SHA" <<<"$state_findings")"
+          repo_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+          short_head="${HEAD_SHA:0:7}"
+          if [ "$REVIEW_MODE" = "incremental" ] && [ -n "$LAST_SHA" ]; then
+            range_link="[\`${LAST_SHA:0:7}\`…\`${short_head}\`](${repo_url}/compare/${LAST_SHA}...${HEAD_SHA})"
+          else
+            range_link="[\`${short_head}\`](${repo_url}/commit/${HEAD_SHA})"
+          fi
+          # Deterministic one-line summary.
+          if [ "$REVIEW_MODE" = "full" ]; then
+            n_blocking="$(jq '[.findings // [] | .[] | select(.severity=="blocker" and (.confidence=="high" or .confidence=="medium"))] | length' "$RUNNER_TEMP/verified-fp.json")"
+            n_major="$(jq '[.findings // [] | .[] | select(.severity=="major" and (.confidence=="high" or .confidence=="medium"))] | length' "$RUNNER_TEMP/verified-fp.json")"
+            n_minor="$(jq '(.minors // [] | length)' <<<"$(jq -n --argjson m "$all_minors" '{"minors":$m}')")"
+            if [ "$n_blocking" -eq 0 ] && [ "$n_major" -eq 0 ] && [ "$n_minor" -eq 0 ]; then
+              summary="No findings."
+            else
+              summary="${n_blocking} blocking, ${n_major} major, ${n_minor} minor/nit findings."
+            fi
+          else
+            n_resolved="$(jq '[.prior // [] | .[] | select(.status=="fixed")] | length' "$RUNNER_TEMP/verified-fp.json")"
+            n_remaining="$(jq '[.prior // [] | .[] | select(.status=="unfixed")] | length' "$RUNNER_TEMP/verified-fp.json")"
+            n_new="$(jq 'length' <<<"$valid_inline")"
+            summary="Resolved ${n_resolved}, remaining ${n_remaining}, new ${n_new}."
+          fi
+          # Verdict label (uses event actually posted).
+          case "$event_used" in
+            REQUEST_CHANGES) verdict_label="REQUEST_CHANGES" ;;
+            APPROVE)         verdict_label="APPROVE" ;;
+            COMMENT)         verdict_label="COMMENT" ;;
+            *)               verdict_label="$event_used" ;;
+          esac
+          # Build warnings lines.
+          extra_lines=""
+          [ -n "$SIZE_WARNING" ]   && extra_lines="${extra_lines}${SIZE_WARNING}\n"
+          [ -n "$CONFIG_WARNING" ] && extra_lines="${extra_lines}${CONFIG_WARNING}\n"
+
+          marker_ack="<!-- ai-review:ack -->"
+          status_body="$(printf '%s\n\n✅ ai-review: **%s** review of %s — **%s** (triggered by %s)\n\n%s\n%s%s' \
+            "$marker_ack" \
+            "$REVIEW_MODE" \
+            "$range_link" \
+            "$verdict_label" \
+            "$TRIGGER_DESC" \
+            "$summary" \
+            "$extra_lines" \
+            "$state_marker")"
+          # Write to a temp file so we don't have to worry about shell quoting of the body.
+          jq -n --arg body "$status_body" '{"body": $body}' > "$RUNNER_TEMP/status-update.json"
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$STATUS_COMMENT_ID" \
+            --input "$RUNNER_TEMP/status-update.json" > /dev/null
+
+          # --- 11. Emit job outputs -------------------------------------------
+          delim_v="VERDICT_EOF_$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+          {
+            echo "verdict<<${delim_v}"
+            echo "$event_used"
+            echo "${delim_v}"
+            echo "intended_verdict<<${delim_v}"
+            echo "$intended_verdict"
+            echo "${delim_v}"
+          } >> "$GITHUB_OUTPUT"
 
   # Deterministic post-pass — no LLM, trusted shell only. Owns the review
   # lifecycle mutations that must not depend on agent compliance (we observed
@@ -959,43 +1400,62 @@ jobs:
           PR_NUMBER: ${{ needs.gate.outputs.pr }}
           PRIOR_REVIEW_ID: ${{ needs.gate.outputs.prior_review_id }}
           HEAD_SHA: ${{ needs.gate.outputs.head_sha }}
+          # Job outputs from llm-review (may be empty on job-failure path).
+          INTENDED_VERDICT: ${{ needs.llm-review.outputs.intended_verdict }}
         run: |
           set -euo pipefail
           # shellcheck source=scripts/lib/reconcile.sh
           . .ai-review-tooling/scripts/lib/reconcile.sh
 
-          latest_state=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" --paginate \
-            | jq -rs 'add
-                | [.[] | select((.user.type == "Bot")
-                    and (.user.login | startswith("github-actions"))
-                    and (.state != "DISMISSED") and (.state != "PENDING"))]
-                | last | .state // empty')
-          echo "Latest bot review state: ${latest_state:-none}"
+          # Prefer the llm-review job's intended_verdict output when present
+          # (deterministic); fall back to re-deriving from the API (job-failure path).
+          if [ -n "$INTENDED_VERDICT" ]; then
+            latest_state="$INTENDED_VERDICT"
+            echo "Using llm-review intended_verdict: $latest_state"
+          else
+            latest_state=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" --paginate \
+              | jq -rs 'add
+                  | [.[] | select((.user.type == "Bot")
+                      and (.user.login | startswith("github-actions"))
+                      and (.state != "DISMISSED") and (.state != "PENDING"))]
+                  | last | .state // empty') || latest_state=""
+            echo "Derived latest bot review state from API: ${latest_state:-none}"
+          fi
 
           # Dismiss the superseded REQUEST_CHANGES review when the verdict
-          # flipped to APPROVE (idempotent; the agent may have already done it).
-          if [ "$latest_state" = "APPROVED" ] && [ -n "$PRIOR_REVIEW_ID" ]; then
+          # flipped to APPROVE (idempotent; COMMENT fallback for APPROVE counts).
+          if [ "$latest_state" = "APPROVE" ] && [ -n "$PRIOR_REVIEW_ID" ]; then
+            gh api -X PUT "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews/$PRIOR_REVIEW_ID/dismissals" \
+              -f message="Superseded by updated ai-review approval" -f event="DISMISS" \
+              || echo "Dismissal failed (already dismissed?); continuing."
+          elif [ "$latest_state" = "APPROVED" ] && [ -n "$PRIOR_REVIEW_ID" ]; then
             gh api -X PUT "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews/$PRIOR_REVIEW_ID/dismissals" \
               -f message="Superseded by updated ai-review approval" -f event="DISMISS" \
               || echo "Dismissal failed (already dismissed?); continuing."
           fi
 
-          # The state marker the agent just wrote lists the findings that are
-          # STILL OPEN (with their live threadIds). Contract: any unresolved
+          # The state marker the posting step just wrote lists the findings that
+          # are STILL OPEN (with their live threadIds). Contract: any unresolved
           # bot-authored thread whose id is absent from that list is fixed or
           # stale -> resolve it. On APPROVE the list is empty, so everything
           # bot-authored gets resolved. Threads in the state stay open.
           state_json="$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" --paginate \
             | reconcile_state_from_comments)"
-          gate="$(reconcile_resolution_gate "$latest_state" "$HEAD_SHA" <<<"$state_json")"
+          # Use APPROVE (from API) for the gate check; INTENDED_VERDICT is our
+          # logical verdict, but the API state is what matters for the gate.
+          api_state=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" --paginate \
+            | jq -rs 'add
+                | [.[] | select((.user.type == "Bot")
+                    and (.user.login | startswith("github-actions"))
+                    and (.state != "DISMISSED") and (.state != "PENDING"))]
+                | last | .state // empty') || api_state=""
+          gate="$(reconcile_resolution_gate "${api_state:-}" "$HEAD_SHA" <<<"$state_json")"
           if [ "$gate" != "proceed" ]; then
             echo "Resolution gate: $gate — skipping thread resolution."
             exit 0
           fi
-          if [ "$latest_state" = "APPROVED" ]; then
-            # APPROVE contract: every bot-authored thread is fixed/stale; the
-            # state list is irrelevant (it may be stale if the LLM skipped the
-            # marker update). Resolve everything live.
+          # APPROVE intent (even if posted as COMMENT fallback): resolve everything.
+          if [ "$latest_state" = "APPROVE" ] || [ "$api_state" = "APPROVED" ]; then
             state_ids=""
           else
             state_ids="$(reconcile_open_thread_ids <<<"$state_json")"
@@ -1004,24 +1464,60 @@ jobs:
 
           owner="${GITHUB_REPOSITORY%/*}"
           repo="${GITHUB_REPOSITORY#*/}"
-          # shellcheck disable=SC2016
-          thread_ids=$(gh api graphql -f query='
-            query($owner: String!, $repo: String!, $number: Int!) {
-              repository(owner: $owner, name: $repo) {
-                pullRequest(number: $number) {
-                  reviewThreads(last: 100) {
-                    nodes {
-                      id
-                      isResolved
-                      comments(first: 1) { nodes { author { login } } }
+          # Paginated cursor loop for live thread IDs.
+          cursor3=""
+          thread_ids=""
+          while true; do
+            if [ -n "$cursor3" ]; then
+              # shellcheck disable=SC2016
+              page3="$(gh api graphql \
+                -f query='
+                  query($owner: String!, $repo: String!, $number: Int!, $after: String) {
+                    repository(owner: $owner, name: $repo) {
+                      pullRequest(number: $number) {
+                        reviewThreads(first: 50, after: $after) {
+                          nodes {
+                            id
+                            isResolved
+                            comments(first: 1) { nodes { author { login } } }
+                          }
+                          pageInfo { hasNextPage endCursor }
+                        }
+                      }
                     }
-                  }
-                }
-              }
-            }' -f owner="$owner" -f repo="$repo" -F number="$PR_NUMBER" \
-            --jq '.data.repository.pullRequest.reviewThreads.nodes[]
-                  | select(.isResolved == false and .comments.nodes[0].author.login == "github-actions")
-                  | .id')
+                  }' \
+                -f owner="$owner" -f repo="$repo" -F number="$PR_NUMBER" -f after="$cursor3")"
+            else
+              # shellcheck disable=SC2016
+              page3="$(gh api graphql \
+                -f query='
+                  query($owner: String!, $repo: String!, $number: Int!) {
+                    repository(owner: $owner, name: $repo) {
+                      pullRequest(number: $number) {
+                        reviewThreads(first: 50) {
+                          nodes {
+                            id
+                            isResolved
+                            comments(first: 1) { nodes { author { login } } }
+                          }
+                          pageInfo { hasNextPage endCursor }
+                        }
+                      }
+                    }
+                  }' \
+                -f owner="$owner" -f repo="$repo" -F number="$PR_NUMBER")"
+            fi
+            new_ids="$(jq -r '
+              .data.repository.pullRequest.reviewThreads.nodes[]
+              | select(.isResolved == false and .comments.nodes[0].author.login == "github-actions")
+              | .id' <<<"$page3" || true)"
+            [ -n "$new_ids" ] && thread_ids="$(printf '%s\n%s' "$thread_ids" "$new_ids")"
+            has_next3="$(jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage // "false"' <<<"$page3")"
+            cursor3="$(jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.endCursor // ""' <<<"$page3")"
+            if [ "$has_next3" != "true" ] || [ -z "$cursor3" ]; then break; fi
+          done
+          thread_ids="${thread_ids#$'\n'}"  # strip leading newline
+
           [ -n "$thread_ids" ] || { echo "No unresolved bot threads."; exit 0; }
           printf '%s\n' "$thread_ids" > "$RUNNER_TEMP/live_ids"
           printf '%s\n' "$state_ids" > "$RUNNER_TEMP/state_ids"

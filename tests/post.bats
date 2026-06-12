@@ -841,3 +841,166 @@ EOF
   run bash -c 'source "$1/scripts/lib/post.sh"; post_match_threads /nonexistent/path.json "$2"' _ "$REPO_ROOT" "$threads_file"
   [ "$status" -ne 0 ]
 }
+
+# ---------------------------------------------------------------------------
+# Composition smoke test: full posting pipeline under set -euo pipefail
+# Fixture: verified.json with 2 findings (1 anchorable blocker, 1 mis-anchored minor)
+# + a matching diff — exercises fingerprints → budget → anchors → compose_review
+# → state composition → reconcile round-trip.
+# No network, no gh calls.
+# ---------------------------------------------------------------------------
+
+@test "pipeline: full posting pipeline smoke test (no network)" {
+  # shellcheck source=/dev/null
+  source "$REPO_ROOT/scripts/lib/reconcile.sh"
+
+  local verified diff_file threads_file
+
+  # Fixture: verified.json — 1 anchorable blocker + 1 mis-anchored minor
+  verified="$BATS_TEST_TMPDIR/verified.json"
+  cat > "$verified" <<'EOF'
+{
+  "mode": "full",
+  "walkthrough": "## Summary by ai-review\n\n| Files | Description |\n|---|---|\n| src/a.py | Added bad code |\n\n### Findings\n- Blockers: 1\n- Major: 0\n- Minor/Nit: 1",
+  "findings": [
+    {
+      "path": "src/a.py",
+      "line": 2,
+      "end_line": null,
+      "side": "RIGHT",
+      "severity": "blocker",
+      "confidence": "high",
+      "evidence": "logic-proof",
+      "body": "This is a blocking issue on the added line.",
+      "tool": null,
+      "rule_id": null,
+      "verification": "Confirmed: line 2 is in diff"
+    },
+    {
+      "path": "src/a.py",
+      "line": 999,
+      "end_line": null,
+      "side": "RIGHT",
+      "severity": "minor",
+      "confidence": "low",
+      "evidence": "opinion",
+      "body": "Minor suggestion on a line not in the diff.",
+      "tool": null,
+      "rule_id": null,
+      "verification": "Noted"
+    }
+  ],
+  "prior": [],
+  "dropped_static": [],
+  "rejected": []
+}
+EOF
+
+  # Fixture diff: one added line 2 in src/a.py
+  diff_file="$BATS_TEST_TMPDIR/pipeline.diff"
+  cat > "$diff_file" <<'DIFF'
+diff --git a/src/a.py b/src/a.py
+index abc..def 100644
+--- a/src/a.py
++++ b/src/a.py
+@@ -1,2 +1,3 @@
+ line one
++bad code here
+ line three
+DIFF
+
+  # Threads file: empty (no prior threads)
+  threads_file="$BATS_TEST_TMPDIR/threads.json"
+  printf '[]' > "$threads_file"
+
+  set -euo pipefail
+
+  # Step 1: fingerprint findings (post_finding_fingerprints takes an array)
+  # Wrap into verified-fp.json that mirrors what the workflow does: the whole
+  # verified object but with .findings fingerprinted in-place.
+  jq '.findings' "$verified" \
+    | post_finding_fingerprints > "$BATS_TEST_TMPDIR/findings-fp.json"
+  jq -e '.[0].fingerprint != null' "$BATS_TEST_TMPDIR/findings-fp.json"
+  # Merge fingerprinted findings back for downstream steps.
+  jq --slurpfile fp "$BATS_TEST_TMPDIR/findings-fp.json" '.findings = $fp[0]' "$verified" \
+    > "$BATS_TEST_TMPDIR/verified-fp.json"
+
+  # Step 2: budget selection — blocker (high, valid path+line) -> inline; minor (low) -> minors
+  budget_json="$(post_select_budget < "$BATS_TEST_TMPDIR/verified-fp.json")"
+  inline_count="$(jq '.inline | length' <<<"$budget_json")"
+  minors_count="$(jq '.minors | length' <<<"$budget_json")"
+  # blocker/high goes inline; minor/low goes to minors
+  [ "$inline_count" -eq 1 ]
+  [ "$minors_count" -eq 1 ]
+  inline_candidates="$(jq -c '.inline' <<<"$budget_json")"
+  minors_from_budget="$(jq -c '.minors' <<<"$budget_json")"
+
+  # Step 3: validate anchors — blocker on line 2 valid; minor on line 999 demoted
+  anchor_result="$(post_validate_anchors "$diff_file" <<<"$inline_candidates")"
+  valid_inline="$(jq -c '.valid' <<<"$anchor_result")"
+  demoted="$(jq -c '.demoted' <<<"$anchor_result")"
+  jq -e 'length == 1' <<<"$valid_inline"
+  jq -e 'length == 0' <<<"$demoted"
+  # The mis-anchored minor was already in minors from budget; anchor step only sees inline candidates
+  all_minors="$(jq -n --argjson d "$demoted" --argjson m "$minors_from_budget" '$d + $m')"
+  jq -e 'length == 1' <<<"$all_minors"
+
+  # Step 4: verdict — blocker/high -> REQUEST_CHANGES
+  verdict="$(post_derive_verdict < "$BATS_TEST_TMPDIR/verified-fp.json")"
+  [ "$verdict" = "REQUEST_CHANGES" ]
+
+  # Step 5: compose review — 1 inline comment + 1 minors entry
+  walkthrough="$(jq -r '.walkthrough' "$BATS_TEST_TMPDIR/verified-fp.json")"
+  compose_input="$(jq -n \
+    --arg w "$walkthrough" \
+    --argjson inline "$valid_inline" \
+    --argjson minors "$all_minors" \
+    --argjson ds '[]' \
+    --argjson rej '[]' \
+    '{"walkthrough":$w,"inline":$inline,"minors":$minors,"dropped_static":$ds,"rejected":$rej}')"
+  review_payload="$(post_compose_review "REQUEST_CHANGES" <<<"$compose_input")"
+  jq -e '.event == "REQUEST_CHANGES"' <<<"$review_payload"
+  jq -e '.comments | length == 1' <<<"$review_payload"
+  jq -e '.comments[0].path == "src/a.py"' <<<"$review_payload"
+  jq -e '.comments[0].line == 2' <<<"$review_payload"
+  jq -e '.body | contains("Minor suggestions")' <<<"$review_payload"
+
+  # Step 6: state composition — blocker is inline/unfixed, so appears in state
+  # Simulate: posted comments matched to threads (none here since threads=[])
+  posted_file="$BATS_TEST_TMPDIR/posted.json"
+  jq -c '[.comments[] | {path: .path, body: .body}]' <<<"$review_payload" > "$posted_file"
+  matched="$(post_match_threads "$posted_file" "$threads_file")"
+  # threadId null since no threads exist yet
+  jq -e '.[0].threadId == null' <<<"$matched"
+
+  # Build state findings: the posted blocker with null threadId
+  posted_findings="$(jq -n \
+    --argjson inline "$valid_inline" \
+    --argjson matched "$matched" \
+    '[range($inline | length) as $i |
+      ($inline[$i]) as $f |
+      ($matched | map(select(.path == $f.path and .body == $f.body)) | first // {"threadId": null}) as $m |
+      {
+        threadId: $m.threadId,
+        file: $f.path,
+        fingerprint: ($f.fingerprint // null),
+        severity: ($f.severity // null)
+      }]')"
+  jq -e 'length == 1' <<<"$posted_findings"
+  jq -e '.[0].severity == "blocker"' <<<"$posted_findings"
+
+  # Step 7: compose state marker
+  state_marker="$(post_compose_state "deadbeef1234567890abcdef1234567890abcdef" <<<"$posted_findings")"
+  [[ "$state_marker" == '<!-- ai-review:state '* ]]
+  [[ "$state_marker" == *' -->' ]]
+  echo "$state_marker" | grep -o '{.*}' | jq -e '.lastSha == "deadbeef1234567890abcdef1234567890abcdef"'
+  echo "$state_marker" | grep -o '{.*}' | jq -e '.findings | length == 1'
+  echo "$state_marker" | grep -o '{.*}' | jq -e '.findings[0].severity == "blocker"'
+
+  # Step 8: round-trip — reconcile reads the state back
+  comments_json="$(jq -n --arg body "$state_marker" \
+    '[{"user":{"type":"Bot","login":"github-actions[bot]"},"body":$body}]')"
+  recovered="$(echo "$comments_json" | reconcile_state_from_comments)"
+  echo "$recovered" | jq -e '.lastSha == "deadbeef1234567890abcdef1234567890abcdef"'
+  echo "$recovered" | jq -e '.findings | length == 1'
+}
