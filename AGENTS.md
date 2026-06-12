@@ -8,6 +8,9 @@ This repo is a reusable GitHub Actions AI PR reviewer — no application runtime
 - `scripts/check-pins.sh`, `scripts/check-contract.py` — invariant guards run in CI.
 - `tests/` — `reconcile.bats` + JSON fixtures. `templates/` — caller workflows for target repos. `rules/` — extra OpenGrep rules.
 
+## Architecture Overview
+`review.yml` is a five-job pipeline: **gate** (resolve PR/SHA, skip drafts, read trusted prior state) → **static** (opengrep/gitleaks/osv → `findings.json`) and **context** (ripgrep cross-file impact map → `context.md`) in parallel → **llm-review** (read-only; runs the opencode CLI with the prompt + artifacts) → **finalize** (`contents:write`; dismisses superseded reviews, resolves threads). `commands.yml` routes `/review`, `/plan`, `/oc` comments into the same review. State lives in one sticky status comment carrying an embedded `<!-- ai-review:state … -->` marker; only the bot-authored marker is trusted, and `reconcile.sh` derives the effective baseline, prior verdict, and open threads from it.
+
 ## Build, Test, and Development Commands
 - `actionlint .github/workflows/*.yml` — lint workflows (bundles shellcheck on every `run:` block).
 - `bats tests/reconcile.bats` — unit-test the reconcile library.
