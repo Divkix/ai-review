@@ -758,6 +758,7 @@ jobs:
           LAST_SHA: ${{ needs.gate.outputs.last_sha }}
           PR_NUMBER: ${{ needs.gate.outputs.pr }}
           HEAD_SHA: ${{ needs.gate.outputs.head_sha }}
+          IGNORE_PATTERNS: ${{ needs.gate.outputs.ignore_patterns }}
         run: |
           set -euo pipefail
           # Force-push can make the previously reviewed SHA unreachable; the
@@ -765,15 +766,29 @@ jobs:
           # the full playbook with a blank LAST_SHA in that case.
           # shellcheck source=scripts/lib/reconcile.sh
           . .ai-review-tooling/scripts/lib/reconcile.sh
+          # shellcheck source=.ai-review-tooling/scripts/lib/scope.sh
+          . .ai-review-tooling/scripts/lib/scope.sh
           eff="$(reconcile_effective_baseline "$MODE" "$LAST_SHA")"
           effective_mode="$(sed -n 's/^mode=//p' <<<"$eff")"
           effective_last_sha="$(sed -n 's/^last_sha=//p' <<<"$eff")"
           if [ "$effective_mode" != "$MODE" ]; then
             echo "Baseline $LAST_SHA unreachable (force-push?); falling back to full review."
           fi
+          # Compute IGNORE_PATHSPECS from config patterns (space-joined, single-quoted).
+          ignore_pathspecs=""
+          if [ -n "$IGNORE_PATTERNS" ]; then
+            pats_file="$(mktemp /tmp/prompt-pats.XXXXXX)"
+            printf '%s\n' "$IGNORE_PATTERNS" > "$pats_file"
+            while IFS= read -r spec; do
+              ignore_pathspecs="${ignore_pathspecs}'${spec}' "
+            done < <(scope_exclude_pathspecs "$pats_file")
+            rm -f "$pats_file"
+            ignore_pathspecs="${ignore_pathspecs% }"  # trim trailing space
+          fi
           {
             echo "effective_last_sha=$effective_last_sha"
             echo "effective_mode=$effective_mode"
+            echo "ignore_pathspecs=${ignore_pathspecs}"
           } >> "$GITHUB_OUTPUT"
           if [ "$effective_mode" = "incremental" ]; then
             playbook=".ai-review-tooling/prompts/review-incremental.md"
@@ -797,6 +812,7 @@ jobs:
             printf -- '- Prior review id: env `PRIOR_REVIEW_ID` (may be empty)\n'
             printf -- '- Status comment id: env `STATUS_COMMENT_ID`\n'
             printf -- '- Trigger description: env `TRIGGER_DESC`\n'
+            printf -- '- Ignored pathspecs: env `IGNORE_PATHSPECS` (may be empty)\n'
           } > "$RUNNER_TEMP/prompt.md"
           delim="PROMPT_EOF_$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
           {
@@ -878,6 +894,9 @@ jobs:
           REVIEW_MODE: ${{ steps.prompt.outputs.effective_mode }}
           GITHUB_BASE_REF: ${{ needs.gate.outputs.base_ref }}
           PR_NUMBER: ${{ needs.gate.outputs.pr }}
+          # Space-joined single-quoted :(exclude) pathspecs for git diff.
+          # Empty when no config ignore patterns are set.
+          IGNORE_PATHSPECS: ${{ steps.prompt.outputs.ignore_pathspecs }}
 
       # opencode's runner always posts its final chat response as a PR comment
       # (hardcoded in `opencode github run`). The review + sticky status
