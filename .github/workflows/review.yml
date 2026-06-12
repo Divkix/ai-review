@@ -645,11 +645,20 @@ jobs:
           BASE_REF: ${{ needs.gate.outputs.base_ref }}
           MODE: ${{ needs.gate.outputs.mode }}
           LAST_SHA: ${{ needs.gate.outputs.last_sha }}
+          IGNORE_PATTERNS: ${{ needs.gate.outputs.ignore_patterns }}
         run: |
           set -euo pipefail
           command -v rg >/dev/null || { echo "::error::ripgrep (rg) is not installed; impact map would be silently empty"; exit 1; }
-          # shellcheck source=scripts/lib/context.sh
+          # shellcheck source=.ai-review-tooling/scripts/lib/scope.sh
+          . .ai-review-tooling/scripts/lib/scope.sh
+          # shellcheck source=.ai-review-tooling/scripts/lib/context.sh
           . .ai-review-tooling/scripts/lib/context.sh
+          # Build patterns file: config patterns (from gate) + built-in patterns.
+          patterns_file="$(mktemp /tmp/context-patterns.XXXXXX)"
+          if [ -n "$IGNORE_PATTERNS" ]; then
+            printf '%s\n' "$IGNORE_PATTERNS" >> "$patterns_file"
+          fi
+          scope_builtin_ignores >> "$patterns_file"
           if [ "$MODE" = incremental ] && [ -n "$LAST_SHA" ] \
             && git cat-file -e "${LAST_SHA}^{commit}" 2>/dev/null; then
             range="${LAST_SHA}...HEAD"
@@ -657,7 +666,8 @@ jobs:
             range="origin/${BASE_REF}...HEAD"
           fi
           echo "Impact range: $range"
-          context_build_map "$range" > context.md
+          context_build_map "$range" "$patterns_file" > context.md
+          rm -f "$patterns_file"
           # Hard cap so a huge PR can't blow the prompt/token budget.
           head -c 60000 context.md > context.trunc && mv context.trunc context.md
           wc -c context.md
