@@ -57,7 +57,7 @@ Open a pull request against the branch your caller workflow watches. Within a mi
 
 ## Versioning
 
-**Alpha.** Callers pin an exact release tag (currently `@v0.0.3`), not a floating major — the API is still changing. Tag releases of this repo; when cutting a new one, bump every internal pin to the new tag (the **pins** CI job fails if any are out of sync):
+**Alpha.** Callers pin an exact release tag (currently `@v0.0.3`), not a floating major — the API is still changing. Tag releases of this repo; when cutting a new one, run `scripts/release.sh <tag>` (bumps every internal pin and re-verifies); locations it touches:
 
 1. `.github/workflows/review.yml` — tooling checkout `ref:` in the `static`, `llm-review`, and `finalize` jobs (3 occurrences).
 2. `.github/workflows/commands.yml` — tooling checkout `ref:`.
@@ -93,7 +93,7 @@ Open a pull request against the branch your caller workflow watches. Within a mi
 
 ## Development
 
-There are no live PRs in CI — `.github/workflows/ci.yml` runs four static jobs on every push/PR (no secrets, no DeepSeek):
+There are no live PRs in CI — `.github/workflows/ci.yml` runs four static jobs on every push/PR (no secrets, no DeepSeek). Run them all locally with `make check`:
 
 | Job | What it guards | Run locally |
 |---|---|---|
