@@ -96,6 +96,8 @@ jobs:
       last_sha: ${{ steps.state.outputs.last_sha }}
       prior_review_id: ${{ steps.prior.outputs.prior_review_id }}
       ignore_patterns: ${{ steps.size_guard.outputs.ignore_patterns }}
+      size_warning: ${{ steps.size_guard.outputs.size_warning }}
+      config_warning: ${{ steps.size_guard.outputs.config_warning }}
     steps:
       - name: Resolve PR and draft gate
         id: resolve
@@ -897,6 +899,11 @@ jobs:
           # Space-joined single-quoted :(exclude) pathspecs for git diff.
           # Empty when no config ignore patterns are set.
           IGNORE_PATHSPECS: ${{ steps.prompt.outputs.ignore_pathspecs }}
+          # Gate warnings (size-guard bypass, malformed config). The playbook
+          # carries them into the final status comment; without this the LLM's
+          # rewrite would drop the ⚠️ lines the ack step showed mid-run (#22).
+          SIZE_WARNING: ${{ needs.gate.outputs.size_warning }}
+          CONFIG_WARNING: ${{ needs.gate.outputs.config_warning }}
 
       # opencode's runner always posts its final chat response as a PR comment
       # (hardcoded in `opencode github run`). The review + sticky status
