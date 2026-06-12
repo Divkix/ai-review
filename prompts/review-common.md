@@ -87,3 +87,4 @@ Match each thread's first comment (by `path` + `body`) to the inline comments yo
 - The `ai-review:ack` and `ai-review:state` markers must both be present, exactly as shown.
 - `lastSha`: value of env `HEAD_SHA`.
 - `findings`: one entry per inline comment you posted, PLUS any prior finding that is still unfixed (per your playbook's prior-findings reconciliation step) — `file`, `fingerprint` (the static `ruleId`, or a short hash of the comment message for your own findings), and `threadId` if known. The state must contain ONLY still-open findings: a deterministic workflow step resolves every unresolved bot thread whose id is absent from this list, so omitting a live finding's `threadId` would wrongly resolve its thread.
+- Warnings: if env `SIZE_WARNING` or `CONFIG_WARNING` is non-empty, include each one verbatim as its own line directly above the state marker. Never invent warning lines yourself.
