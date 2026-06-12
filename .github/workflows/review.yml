@@ -292,7 +292,7 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           repository: divkix/ai-review
-          ref: v0.0.2
+          ref: v0.0.3
           path: .ai-review-tooling
           persist-credentials: false
 
@@ -574,7 +574,7 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           repository: divkix/ai-review
-          ref: v0.0.2
+          ref: v0.0.3
           path: .ai-review-tooling
           persist-credentials: false
 
@@ -685,6 +685,11 @@ jobs:
         run: opencode github run
         env:
           MODEL: deepseek/deepseek-v4-pro
+          # Max reasoning effort. opencode's `github run` reads VARIANT and maps
+          # it to the model's reasoningEffort; deepseek-v4 exposes low/med/high/max
+          # (see opencode transform.ts variants()). Config-file options are NOT
+          # loaded on this path, so the variant must be set here.
+          VARIANT: max
           USE_GITHUB_TOKEN: 'true'
           SHARE: 'false'
           PROMPT: ${{ steps.prompt.outputs.prompt }}
@@ -749,7 +754,7 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           repository: divkix/ai-review
-          ref: v0.0.2
+          ref: v0.0.3
           path: .ai-review-tooling
           persist-credentials: false
 

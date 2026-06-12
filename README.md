@@ -57,7 +57,7 @@ Open a pull request against the branch your caller workflow watches. Within a mi
 
 ## Versioning
 
-**Alpha.** Callers pin an exact release tag (currently `@v0.0.2`), not a floating major — the API is still changing. Tag releases of this repo; when cutting a new one, bump every internal pin to the new tag (the **pins** CI job fails if any are out of sync):
+**Alpha.** Callers pin an exact release tag (currently `@v0.0.3`), not a floating major — the API is still changing. Tag releases of this repo; when cutting a new one, bump every internal pin to the new tag (the **pins** CI job fails if any are out of sync):
 
 1. `.github/workflows/review.yml` — tooling checkout `ref:` in the `static`, `llm-review`, and `finalize` jobs (3 occurrences).
 2. `.github/workflows/commands.yml` — tooling checkout `ref:`.
