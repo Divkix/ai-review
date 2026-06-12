@@ -48,35 +48,58 @@ setup() {
   [ "$output" = "PRRT_mapped" ]
 }
 
-# --- reconcile_null_count ----------------------------------------------------
+# --- reconcile_resolution_gate ----------------------------------------------
 
-@test "null count: zero when all mapped" {
+@test "resolution gate: APPROVED -> proceed regardless of state" {
+  run reconcile_resolution_gate "APPROVED" "x" <<<"$( printf '{}' )"
+  [ "$status" -eq 0 ]
+  [ "$output" = "proceed" ]
+}
+
+@test "resolution gate: CR + fresh mapped non-empty state -> proceed" {
   state="$(reconcile_state_from_comments < "$FIX/comments-open-finding.json")"
-  run reconcile_null_count <<<"$state"
-  [ "$output" = "0" ]
+  run reconcile_resolution_gate "CHANGES_REQUESTED" "cafe01" <<<"$state"
+  [ "$status" -eq 0 ]
+  [ "$output" = "proceed" ]
 }
 
-@test "null count: one when a finding has null threadId" {
+@test "resolution gate: CR + stale lastSha -> skip:stale-state" {
+  state="$(reconcile_state_from_comments < "$FIX/comments-open-finding.json")"
+  run reconcile_resolution_gate "CHANGES_REQUESTED" "deadbeef" <<<"$state"
+  [ "$status" -eq 0 ]
+  [ "$output" = "skip:stale-state" ]
+}
+
+@test "resolution gate: CR + findings is a string -> skip:malformed-findings" {
+  state="$(reconcile_state_from_comments < "$FIX/comments-malformed-findings.json")"
+  run reconcile_resolution_gate "CHANGES_REQUESTED" "bbb222" <<<"$state"
+  [ "$status" -eq 0 ]
+  [ "$output" = "skip:malformed-findings" ]
+}
+
+@test "resolution gate: CR + invalid JSON state -> skip:malformed-findings" {
+  run reconcile_resolution_gate "CHANGES_REQUESTED" "abc" <<<"not-json"
+  [ "$status" -eq 0 ]
+  [ "$output" = "skip:malformed-findings" ]
+}
+
+@test "resolution gate: CR + empty findings -> skip:empty-findings-on-cr" {
+  run reconcile_resolution_gate "CHANGES_REQUESTED" "abc" <<<'{"lastSha":"abc","findings":[]}'
+  [ "$status" -eq 0 ]
+  [ "$output" = "skip:empty-findings-on-cr" ]
+}
+
+@test "resolution gate: CR + null threadId -> skip:unmapped-findings" {
   state="$(reconcile_state_from_comments < "$FIX/comments-null-thread.json")"
-  run reconcile_null_count <<<"$state"
-  [ "$output" = "1" ]
+  run reconcile_resolution_gate "CHANGES_REQUESTED" "f00d02" <<<"$state"
+  [ "$status" -eq 0 ]
+  [ "$output" = "skip:unmapped-findings" ]
 }
 
-# --- reconcile_should_skip (safety gate) ------------------------------------
-
-@test "gate: non-approve + unmapped findings -> SKIP" {
-  run reconcile_should_skip "CHANGES_REQUESTED" 1
-  [ "$status" -eq 0 ]   # 0 = skip
-}
-
-@test "gate: APPROVED + unmapped findings -> proceed" {
-  run reconcile_should_skip "APPROVED" 2
-  [ "$status" -eq 1 ]   # 1 = proceed
-}
-
-@test "gate: non-approve + complete mapping -> proceed" {
-  run reconcile_should_skip "CHANGES_REQUESTED" 0
-  [ "$status" -eq 1 ]
+@test "resolution gate: COMMENTED + empty findings -> proceed" {
+  run reconcile_resolution_gate "COMMENTED" "abc" <<<'{"lastSha":"abc","findings":[]}'
+  [ "$status" -eq 0 ]
+  [ "$output" = "proceed" ]
 }
 
 # --- reconcile_resolve_set --------------------------------------------------
