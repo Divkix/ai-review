@@ -55,6 +55,31 @@ Open a pull request against the branch your caller workflow watches. Within a mi
 - **Model**: set the `model`, `variant`, and `api_key_env` inputs in your caller workflow (see the commented-out `with:` block in the templates) — no fork needed. Default is `deepseek/deepseek-v4-pro` with `variant: max`; any [models.dev](https://models.dev) provider works with its corresponding `api_key_env`. The scaffolding (scanners, context, ranking, lifecycle) is model-agnostic; pointing it at a stronger model is the single biggest review-quality lever.
 - **opencode CLI**: pinned by version + sha256 in the workflows (`OPENCODE_VERSION` in `review.yml` ×1 and `commands.yml` ×2). Bump both values together.
 
+## Per-repo configuration
+
+Place a `.ai-review.yml` file at the root of the **base branch** to tune scope and size limits:
+
+```yaml
+version: 1
+ignore:
+  - "dist/**"
+  - "vendor/**"
+  - "**/*.pb.go"
+  - "docs/generated/**"
+max_changed_files: 400    # optional; default 400
+max_diff_lines: 20000     # optional; default 20 000
+```
+
+**Where it lives**: the file is read from the **base branch** only, never from the PR head. This closes a threat: a PR author cannot write an `.ai-review.yml` that ignores their own sensitive changes. The config PR itself is reviewed with the old (or absent) config — same behavior as branch protection rules.
+
+**`ignore:` controls what the AI reviews, never what the scanners report.** Scanners (gitleaks, opengrep, osv-scanner) run on everything and their SARIF uploads are always complete. `ignore:` filters: the diff the LLM reads, the cross-file impact map sweep, and findings forwarded to the LLM. HIGH-severity findings from ignored paths are still forwarded, marked `ignoredPath: true`, and surfaced in the walkthrough body.
+
+**Size guard**: auto-triggered reviews (push, PR open) are skipped when the filtered diff exceeds `max_changed_files` or `max_diff_lines`. Filtered counts exclude files matching `ignore:` patterns and built-in generated/lockfile patterns (`*.lock`, `*.sum`, `*-lock.json`, `*.min.*`, `*.svg`, `*.map`). A sticky `<!-- ai-review:too-large -->` comment is posted instead. Explicit `/review` or `/review full` commands always bypass the guard; if the PR is over limit they gain a warning line `⚠️ Large PR (N files / M lines) — token usage may be high.`
+
+**Fail-open**: a malformed or unknown-version `.ai-review.yml` causes the review to run with defaults, with a `⚠️ .ai-review.yml on <branch> is malformed — using defaults.` warning line in the status comment.
+
+**Pattern matching**: patterns use simplified glob matching (bash `case` fnmatch semantics — `*` crosses `/`, `dist/**` → `dist/*`). This covers the common cases; for advanced pathspec matching see `docs/design/pr-scope-config.md`.
+
 ## Versioning
 
 **Alpha.** Callers pin an exact release tag (currently `@v0.1.0`), not a floating major — the API is still changing. Tag releases of this repo; when cutting a new one, run `scripts/release.sh <tag>` (bumps every internal pin and re-verifies); locations it touches:
@@ -88,7 +113,7 @@ Open a pull request against the branch your caller workflow watches. Within a mi
 
 - No auto-resolve UI buttons (no "Fix all").
 - No cross-PR memory; incremental state is per-PR.
-- No diff-size guard or path filters: a very large PR can blow the model's token budget, and there's no per-repo config (no `.coderabbit.yaml`-style include/exclude). Tune scope via the `prompts/` playbooks.
+- Path filters use simplified glob matching (bash fnmatch, not full gitignore semantics) — advanced patterns like character classes or negation are not supported; see `docs/design/pr-scope-config.md`.
 - The `context` job is heuristic identifier grep, not a real call graph — expect occasional false leads, and on large repos the sweep adds latency.
 - Review *posting* (inline comments, verdict, state marker) still depends on the LLM following the playbook; only thread resolution/dismissal is deterministic.
 - Gitleaks runs in full git mode, so the first run scans the whole repo history.
