@@ -1,5 +1,7 @@
 # ai-review
 
+[![CI](https://github.com/Divkix/ai-review/actions/workflows/ci.yml/badge.svg)](https://github.com/Divkix/ai-review/actions/workflows/ci.yml)
+
 Self-hosted, CodeRabbit-style AI pull request reviewer that runs entirely in GitHub Actions. Static analysis — OpenGrep (AST/SAST), Gitleaks (secrets), and OSV-Scanner (dependency CVEs) — feeds an LLM reviewer (opencode agent + DeepSeek V4 Pro, bring your own key). Zero backend, zero per-run fees: the only costs are GitHub Actions minutes (free for public repos) and DeepSeek tokens.
 
 ## How it works
@@ -88,6 +90,19 @@ Callers pin `@v1`. Tag releases of this repo. When cutting v2, bump every intern
 - The `context` job is heuristic identifier grep, not a real call graph — expect occasional false leads, and on large repos the sweep adds latency.
 - Review *posting* (inline comments, verdict, state marker) still depends on the LLM following the playbook; only thread resolution/dismissal is deterministic.
 - Gitleaks runs in full git mode, so the first run scans the whole repo history.
+
+## Development
+
+There are no live PRs in CI — `.github/workflows/ci.yml` runs four static jobs on every push/PR (no secrets, no DeepSeek):
+
+| Job | What it guards | Run locally |
+|---|---|---|
+| **lint** | `actionlint` (+ bundled `shellcheck`) on both workflows | `actionlint .github/workflows/*.yml` |
+| **pins** | `OPENCODE_VERSION`/`OPENCODE_SHA256` in sync across all copies, the pinned sha256 matches the real release asset, and all `vN` pins share one major | `scripts/check-pins.sh` (offline: `CHECK_PINS_OFFLINE=1`) |
+| **contract** | every `$VAR` the prompts read is set in a workflow `env:`; caller templates grant a permission superset; the gate's state-marker regex matches `reconcile.sh` | `python3 scripts/check-contract.py` |
+| **unit** | the pure reconcile logic the workflows source (`scripts/lib/reconcile.sh`) — baseline fallback, state parsing, the null-threadId safety gate, the resolve-set diff | `bats tests/reconcile.bats` |
+
+The review/finalize jobs `source scripts/lib/reconcile.sh` (checked out as `.ai-review-tooling`), so the bats tests exercise the *same* code the workflows run — no copy drift. When bumping the opencode pin, change `OPENCODE_VERSION` **and** `OPENCODE_SHA256` together (all three copies); the **pins** job fails otherwise.
 
 ## License
 

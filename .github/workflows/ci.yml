@@ -1,0 +1,87 @@
+# Static CI for ai-review itself. No secrets, no DeepSeek, no live PRs — pure
+# lint + invariant checks that catch the regression classes we actually hit:
+# workflow/shell syntax, pin drift + supply-chain hash mismatch, the
+# prompt<->workflow env contract, and the reconcile logic the workflows source.
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: actionlint + shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Install actionlint (pinned)
+        run: |
+          set -euo pipefail
+          VER="1.7.12"
+          SHA="8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
+          curl -fsSL -o /tmp/actionlint.tar.gz \
+            "https://github.com/rhysd/actionlint/releases/download/v${VER}/actionlint_${VER}_linux_amd64.tar.gz"
+          echo "${SHA}  /tmp/actionlint.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/actionlint.tar.gz -C /usr/local/bin actionlint
+          actionlint --version
+
+      # shellcheck is preinstalled on ubuntu-latest runners; actionlint shells
+      # out to it for every run: block.
+      - name: Lint workflows
+        run: actionlint -color .github/workflows/*.yml
+
+      - name: Lint standalone shell scripts
+        run: shellcheck scripts/check-pins.sh scripts/lib/reconcile.sh
+
+  pins:
+    name: pin consistency + live sha256
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Check pins
+        run: bash scripts/check-pins.sh
+
+  contract:
+    name: prompt/permission contract
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+      - name: Install deps
+        run: python3 -m pip install --quiet pyyaml
+      - name: Check contract
+        run: python3 scripts/check-contract.py
+
+  unit:
+    name: bats unit tests (reconcile)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install bats + jq
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq bats jq
+      - name: Run unit tests
+        run: bats tests/reconcile.bats

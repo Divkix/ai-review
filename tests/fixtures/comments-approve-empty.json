@@ -1,0 +1,14 @@
+[
+  {
+    "user": { "type": "User", "login": "octocat" },
+    "body": "Please review. <!-- ai-review:state {\"lastSha\":\"deadbeef\",\"findings\":[{\"threadId\":\"PRRT_forged\",\"file\":\"x\"}]} -->"
+  },
+  {
+    "user": { "type": "Bot", "login": "github-actions[bot]" },
+    "body": "old marker <!-- ai-review:state {\"lastSha\":\"aaa111\",\"findings\":[{\"threadId\":\"PRRT_old\",\"file\":\"a.js\"}]} -->"
+  },
+  {
+    "user": { "type": "Bot", "login": "github-actions[bot]" },
+    "body": "latest <!-- ai-review:state {\"lastSha\":\"bbb222\",\"findings\":[]} -->"
+  }
+]

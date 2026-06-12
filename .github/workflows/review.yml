@@ -285,6 +285,17 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # Bump ref when releasing v2 of divkix/ai-review. Checked out before the
+      # baseline step so it can source scripts/lib/reconcile.sh; into a subpath
+      # so it never disturbs the PR-head working tree.
+      - name: Checkout ai-review tooling (rules + lib)
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          repository: divkix/ai-review
+          ref: v1
+          path: .ai-review-tooling
+          persist-credentials: false
+
       # Force-push can make the previously reviewed SHA unreachable; in that
       # case incremental baselines (opengrep/gitleaks) would error or silently
       # scan nothing. Compute job-local "effective" mode/baseline that fall
@@ -296,28 +307,18 @@ jobs:
           LAST_SHA: ${{ needs.gate.outputs.last_sha }}
         run: |
           set -euo pipefail
-          effective_mode="$MODE"
-          effective_last_sha="$LAST_SHA"
-          if [ "$MODE" = "incremental" ] && [ -n "$LAST_SHA" ]; then
-            if ! git cat-file -e "$LAST_SHA^{commit}" 2>/dev/null; then
-              echo "Baseline $LAST_SHA unreachable (force-push?); falling back to full scan."
-              effective_mode=full
-              effective_last_sha=""
-            fi
+          # shellcheck source=scripts/lib/reconcile.sh
+          . .ai-review-tooling/scripts/lib/reconcile.sh
+          eff="$(reconcile_effective_baseline "$MODE" "$LAST_SHA")"
+          effective_mode="$(sed -n 's/^mode=//p' <<<"$eff")"
+          effective_last_sha="$(sed -n 's/^last_sha=//p' <<<"$eff")"
+          if [ "$effective_mode" != "$MODE" ]; then
+            echo "Baseline $LAST_SHA unreachable (force-push?); falling back to full scan."
           fi
           {
             echo "effective_mode=$effective_mode"
             echo "effective_last_sha=$effective_last_sha"
           } >> "$GITHUB_OUTPUT"
-
-      # Bump ref when releasing v2 of divkix/ai-review.
-      - name: Checkout ai-review tooling (rules)
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          repository: divkix/ai-review
-          ref: v1
-          path: .ai-review-tooling
-          persist-credentials: false
 
       - name: Install opengrep v1.22.0
         run: |
@@ -607,14 +608,13 @@ jobs:
           # Force-push can make the previously reviewed SHA unreachable; the
           # incremental playbook would then diff against nothing. Fall back to
           # the full playbook with a blank LAST_SHA in that case.
-          effective_mode="$MODE"
-          effective_last_sha="$LAST_SHA"
-          if [ "$MODE" = "incremental" ] && [ -n "$LAST_SHA" ]; then
-            if ! git cat-file -e "$LAST_SHA^{commit}" 2>/dev/null; then
-              echo "Baseline $LAST_SHA unreachable (force-push?); falling back to full review."
-              effective_mode=full
-              effective_last_sha=""
-            fi
+          # shellcheck source=scripts/lib/reconcile.sh
+          . .ai-review-tooling/scripts/lib/reconcile.sh
+          eff="$(reconcile_effective_baseline "$MODE" "$LAST_SHA")"
+          effective_mode="$(sed -n 's/^mode=//p' <<<"$eff")"
+          effective_last_sha="$(sed -n 's/^last_sha=//p' <<<"$eff")"
+          if [ "$effective_mode" != "$MODE" ]; then
+            echo "Baseline $LAST_SHA unreachable (force-push?); falling back to full review."
           fi
           {
             echo "effective_last_sha=$effective_last_sha"
@@ -741,6 +741,18 @@ jobs:
       contents: write
       pull-requests: write
     steps:
+      # The pure reconcile transforms live in scripts/lib/reconcile.sh (unit
+      # tested by tests/reconcile.bats); check the tooling out so this job can
+      # source them. Bump ref when releasing v2. No PR-head checkout is needed
+      # — this job only talks to the GitHub API.
+      - name: Checkout ai-review tooling (lib)
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          repository: divkix/ai-review
+          ref: v1
+          path: .ai-review-tooling
+          persist-credentials: false
+
       - name: Reconcile review lifecycle
         env:
           GH_TOKEN: ${{ github.token }}
@@ -748,6 +760,9 @@ jobs:
           PRIOR_REVIEW_ID: ${{ needs.gate.outputs.prior_review_id }}
         run: |
           set -euo pipefail
+          # shellcheck source=scripts/lib/reconcile.sh
+          . .ai-review-tooling/scripts/lib/reconcile.sh
+
           latest_state=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" \
             --jq '[.[] | select(.user.login == "github-actions[bot]" and .state != "DISMISSED")] | last | .state // empty')
           echo "Latest bot review state: ${latest_state:-none}"
@@ -766,21 +781,16 @@ jobs:
           # stale -> resolve it. On APPROVE the list is empty, so everything
           # bot-authored gets resolved. Threads in the state stay open.
           state_json="$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" --paginate \
-            | jq -rs 'add
-                | [.[] | select(.user.type == "Bot"
-                    and (.user.login | startswith("github-actions"))
-                    and (.body | contains("<!-- ai-review:state")))]
-                | last
-                | (.body // "" | capture("<!-- ai-review:state (?<j>.*?) -->"; "s") | .j // "{}")')"
-          state_ids="$(jq -r '(try .findings catch []) // [] | .[].threadId // empty' <<<"$state_json" || true)"
-          null_ids="$(jq -r '(try .findings catch []) // [] | [.[] | select(.threadId == null)] | length' <<<"$state_json" 2>/dev/null || echo 0)"
+            | reconcile_state_from_comments)"
+          state_ids="$(reconcile_open_thread_ids <<<"$state_json" || true)"
+          null_ids="$(reconcile_null_count <<<"$state_json" 2>/dev/null || echo 0)"
           echo "Thread ids still open per state: ${state_ids:-none} (unmapped: $null_ids)"
           # Safety gate: when the verdict is NOT approve and the agent failed
           # to map some open findings to thread ids (threadId null), absence
           # from the id list is meaningless — we could wrongly resolve the
           # very threads just posted. Only proceed if approved or mapping is
           # complete.
-          if [ "$latest_state" != "APPROVED" ] && [ "${null_ids:-0}" -gt 0 ]; then
+          if reconcile_should_skip "$latest_state" "$null_ids"; then
             echo "Unmapped open findings on a non-approved review; skipping thread resolution."
             exit 0
           fi
@@ -806,15 +816,17 @@ jobs:
                   | select(.isResolved == false and .comments.nodes[0].author.login == "github-actions")
                   | .id')
           [ -n "$thread_ids" ] || { echo "No unresolved bot threads."; exit 0; }
+          printf '%s\n' "$thread_ids" > "$RUNNER_TEMP/live_ids"
+          printf '%s\n' "$state_ids" > "$RUNNER_TEMP/state_ids"
+          reconcile_resolve_set "$RUNNER_TEMP/live_ids" "$RUNNER_TEMP/state_ids" \
+            > "$RUNNER_TEMP/resolve_ids"
+          [ -s "$RUNNER_TEMP/resolve_ids" ] || { echo "Nothing to resolve (all open threads still in state)."; exit 0; }
           while IFS= read -r id; do
-            if grep -qxF "$id" <<< "$state_ids"; then
-              echo "Keeping open (still in state): $id"
-              continue
-            fi
+            [ -n "$id" ] || continue
             echo "Resolving $id"
             # shellcheck disable=SC2016
             gh api graphql -f query='
               mutation($id: ID!) {
                 resolveReviewThread(input: {threadId: $id}) { thread { isResolved } }
               }' -f id="$id"
-          done <<< "$thread_ids"
+          done < "$RUNNER_TEMP/resolve_ids"

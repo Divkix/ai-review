@@ -1,0 +1,6 @@
+[
+  {
+    "user": { "type": "Bot", "login": "github-actions[bot]" },
+    "body": "review <!-- ai-review:state {\"lastSha\":\"cafe01\",\"findings\":[{\"threadId\":\"PRRT_keep\",\"file\":\"a.js\",\"fingerprint\":\"f1\"}]} -->"
+  }
+]
