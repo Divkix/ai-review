@@ -1,5 +1,5 @@
 # Copy this file to .github/workflows/ai-review-commands.yml in your repo and
-# add a DEEPSEEK_API_KEY repository secret.
+# add an LLM_API_KEY repository secret (your provider's key; DeepSeek by default).
 # Enables /review, /review full, /plan, and /oc <task> comment commands.
 name: AI Review Commands
 
@@ -31,4 +31,8 @@ jobs:
       security-events: write
       id-token: write
     uses: divkix/ai-review/.github/workflows/commands.yml@v0.0.3
+    # with:
+    #   model: openai/gpt-5
+    #   variant: high
+    #   api_key_env: OPENAI_API_KEY
     secrets: inherit

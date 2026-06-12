@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/Divkix/ai-review/actions/workflows/ci.yml/badge.svg)](https://github.com/Divkix/ai-review/actions/workflows/ci.yml)
 
-Self-hosted, CodeRabbit-style AI pull request reviewer that runs entirely in GitHub Actions. Static analysis — OpenGrep (AST/SAST), Gitleaks (secrets), and OSV-Scanner (dependency CVEs) — feeds an LLM reviewer (opencode agent + DeepSeek V4 Pro, bring your own key). Zero backend, zero per-run fees: the only costs are GitHub Actions minutes (free for public repos) and DeepSeek tokens.
+Self-hosted, CodeRabbit-style AI pull request reviewer that runs entirely in GitHub Actions. Static analysis — OpenGrep (AST/SAST), Gitleaks (secrets), and OSV-Scanner (dependency CVEs) — feeds an LLM reviewer (opencode agent, model-agnostic, bring your own key). Zero backend, zero per-run fees: the only costs are GitHub Actions minutes (free for public repos) and LLM tokens (DeepSeek V4 Pro by default; any [models.dev](https://models.dev) provider works).
 
 ## How it works
 
@@ -40,7 +40,7 @@ Only comments from authors with OWNER, MEMBER, or COLLABORATOR association are h
 
 1. Install the opencode GitHub App ([github.com/apps/opencode-agent](https://github.com/apps/opencode-agent)) on the repo — needed for the `/oc` freeform path (other flows use the workflow `GITHUB_TOKEN`).
 2. Copy `templates/caller-review.yml` → `.github/workflows/ai-review.yml` and `templates/caller-commands.yml` → `.github/workflows/ai-review-commands.yml`. Keep the `permissions:` blocks from the templates: reusable workflows can only downgrade the caller's permissions, never elevate them, so the caller job must grant the superset — the review caller needs `contents: write` (required by the `resolveReviewThread` GraphQL mutation that auto-resolves fixed threads — the review never pushes code), `pull-requests: write`, `issues: write`, `security-events: write`; the commands caller additionally needs `id-token: write`. The reusable workflows' per-job permissions then downgrade from these.
-3. Add a repo secret `DEEPSEEK_API_KEY` ([platform.deepseek.com](https://platform.deepseek.com)). Note: personal GitHub accounts have no account-wide secrets — add it per repo; orgs can use org secrets.
+3. Add a repo secret `LLM_API_KEY` (your provider's key; DeepSeek by default — [platform.deepseek.com](https://platform.deepseek.com)). To use a different provider, also set the `model` and `api_key_env` inputs in your caller workflow (see Customization). Note: personal GitHub accounts have no account-wide secrets — add it per repo; orgs can use org secrets.
 4. Repo Settings → Actions → General → Workflow permissions: enable **"Allow GitHub Actions to create and approve pull requests"**. Required for the APPROVE verdict; without it, reviews fail to APPROVE and fall back to REQUEST_CHANGES/COMMENT errors.
 5. (Optional) Enable Code scanning to see SARIF annotations inline. Uploads are best-effort (`continue-on-error`); the review works without it.
 
@@ -52,12 +52,14 @@ Open a pull request against the branch your caller workflow watches. Within a mi
 
 - **Rules**: drop additional OpenGrep rules into `rules/` in this repo — they are loaded on top of the community pack ([opengrep/opengrep-rules](https://github.com/opengrep/opengrep-rules)). See `rules/example-no-console-log.yaml`. The community pack is pinned to a specific commit (`OPENGREP_RULES_REF` in `review.yml`); bump that value to pick up upstream rule changes.
 - **Prompts**: edit the playbooks in `prompts/` (`review-full.md`, `review-incremental.md`, `plan.md`) to tune review behavior, verdict policy, and comment formats. `review-common.md` is the shared protocol appended to both review modes — edit it to change shared policy (classification rubric, posting mechanics, state contract).
-- **Model**: `deepseek/deepseek-v4-pro`, set in the workflows. Swap by editing `.github/workflows/review.yml` and `commands.yml` — any [models.dev](https://models.dev) provider works with its corresponding env API key. The scaffolding (scanners, context, ranking, lifecycle) is model-agnostic; pointing it at a stronger model is the single biggest review-quality lever.
+- **Model**: set the `model`, `variant`, and `api_key_env` inputs in your caller workflow (see the commented-out `with:` block in the templates) — no fork needed. Default is `deepseek/deepseek-v4-pro` with `variant: max`; any [models.dev](https://models.dev) provider works with its corresponding `api_key_env`. The scaffolding (scanners, context, ranking, lifecycle) is model-agnostic; pointing it at a stronger model is the single biggest review-quality lever.
 - **opencode CLI**: pinned by version + sha256 in the workflows (`OPENCODE_VERSION` in `review.yml` ×1 and `commands.yml` ×2). Bump both values together.
 
 ## Versioning
 
 **Alpha.** Callers pin an exact release tag (currently `@v0.0.3`), not a floating major — the API is still changing. Tag releases of this repo; when cutting a new one, run `scripts/release.sh <tag>` (bumps every internal pin and re-verifies); locations it touches:
+
+**Migration**: next tag: rename your repo secret `DEEPSEEK_API_KEY` → `LLM_API_KEY`.
 
 1. `.github/workflows/review.yml` — tooling checkout `ref:` in the `static`, `llm-review`, and `finalize` jobs (3 occurrences).
 2. `.github/workflows/commands.yml` — tooling checkout `ref:`.
@@ -71,7 +73,7 @@ Open a pull request against the branch your caller workflow watches. Within a mi
 - All third-party actions are pinned to commit SHAs; every fetched tool binary (opencode, opengrep, gitleaks, osv-scanner, ripgrep) is pinned by version + sha256, and the OpenGrep community ruleset is pinned to a commit (no install-latest-at-runtime).
 - Privilege separation: the job that feeds untrusted PR content to the LLM runs with `contents: read` (its token cannot push, even if prompt-injected); the `contents: write` required by GitHub's `resolveReviewThread` mutation lives only in the deterministic `finalize` job, which runs no LLM.
 - Scanners never fail the build; findings flow to the LLM as data.
-- Fork PRs receive no secrets (GitHub default), so the caller template skips them via a `head.repo == repository` condition; a collaborator can trigger `/review` on the PR instead.
+- Fork PRs receive no secrets (GitHub default), so the caller template skips them via a `head.repo == repository` condition (`LLM_API_KEY` would be empty); a collaborator can trigger `/review` on the PR instead.
 
 ## Troubleshooting
 

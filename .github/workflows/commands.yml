@@ -21,9 +21,23 @@ name: Commands
 
 on:
   workflow_call:
+    inputs:
+      model:
+        description: "LLM model id passed to opencode (any models.dev provider/model)"
+        type: string
+        default: deepseek/deepseek-v4-pro
+      variant:
+        description: "Model reasoning-effort variant (opencode maps this to reasoningEffort where the model defines variants)"
+        type: string
+        default: max
+      api_key_env:
+        description: "Env-var name the chosen provider expects for its API key (e.g. OPENAI_API_KEY)"
+        type: string
+        default: DEEPSEEK_API_KEY
     secrets:
-      DEEPSEEK_API_KEY:
+      LLM_API_KEY:
         required: true
+        description: "API key for the provider of inputs.model; exported under the env name in inputs.api_key_env"
 
 jobs:
   route:
@@ -128,10 +142,13 @@ jobs:
       mode: ${{ needs.route.outputs.cmd == 'review_full' && 'full' || 'incremental' }}
       pr_number: ${{ needs.route.outputs.number }}
       trigger_url: ${{ github.event.comment.html_url }}
+      model: ${{ inputs.model }}
+      variant: ${{ inputs.variant }}
+      api_key_env: ${{ inputs.api_key_env }}
     # `secrets: inherit` is unreliable across nested workflow_call layers;
     # forward explicitly.
     secrets:
-      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
 
   plan:
     needs: route
@@ -202,18 +219,31 @@ jobs:
           sudo tar -xzf /tmp/opencode.tar.gz -C /usr/local/bin opencode
           opencode --version
 
+      - name: Export provider API key
+        env:
+          API_KEY_ENV: ${{ inputs.api_key_env }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+        run: |
+          set -euo pipefail
+          # Guard: the env NAME is caller-controlled config; constrain it so it
+          # cannot smuggle GITHUB_ENV line injections or clobber GITHUB_/RUNNER_ vars.
+          if ! grep -qE '^[A-Z][A-Z0-9_]{0,63}$' <<<"$API_KEY_ENV" \
+             || grep -qE '^(GITHUB_|RUNNER_)' <<<"$API_KEY_ENV"; then
+            echo "::error::invalid api_key_env name"; exit 1
+          fi
+          echo "${API_KEY_ENV}=${LLM_API_KEY}" >> "$GITHUB_ENV"
+
       - name: Generate implementation plan
         run: opencode github run
         env:
-          MODEL: deepseek/deepseek-v4-pro
-          # Max reasoning effort (deepseek-v4 supports low/med/high/max); opencode
-          # maps VARIANT to the model's reasoningEffort. Config-file options are not
-          # loaded on this path, so set it here.
-          VARIANT: max
+          MODEL: ${{ inputs.model }}
+          # opencode maps VARIANT to the model's reasoningEffort where the model
+          # defines variants; config-file options are not loaded on this path,
+          # so set it here.
+          VARIANT: ${{ inputs.variant }}
           USE_GITHUB_TOKEN: 'true'
           SHARE: 'false'
           PROMPT: ${{ steps.prompt.outputs.prompt }}
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           GITHUB_TOKEN: ${{ github.token }}
           GH_TOKEN: ${{ github.token }}
           ISSUE_NUMBER: ${{ needs.route.outputs.number }}
@@ -265,18 +295,31 @@ jobs:
           sudo tar -xzf /tmp/opencode.tar.gz -C /usr/local/bin opencode
           opencode --version
 
+      - name: Export provider API key
+        env:
+          API_KEY_ENV: ${{ inputs.api_key_env }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+        run: |
+          set -euo pipefail
+          # Guard: the env NAME is caller-controlled config; constrain it so it
+          # cannot smuggle GITHUB_ENV line injections or clobber GITHUB_/RUNNER_ vars.
+          if ! grep -qE '^[A-Z][A-Z0-9_]{0,63}$' <<<"$API_KEY_ENV" \
+             || grep -qE '^(GITHUB_|RUNNER_)' <<<"$API_KEY_ENV"; then
+            echo "::error::invalid api_key_env name"; exit 1
+          fi
+          echo "${API_KEY_ENV}=${LLM_API_KEY}" >> "$GITHUB_ENV"
+
       # No prompt override: opencode's native mention handling routes /oc
       # commands, including inline PR review comments.
       - name: Run opencode
         run: opencode github run
         env:
-          MODEL: deepseek/deepseek-v4-pro
-          # Max reasoning effort (deepseek-v4 supports low/med/high/max); opencode
-          # maps VARIANT to the model's reasoningEffort. Config-file options are not
-          # loaded on this path, so set it here.
-          VARIANT: max
+          MODEL: ${{ inputs.model }}
+          # opencode maps VARIANT to the model's reasoningEffort where the model
+          # defines variants; config-file options are not loaded on this path,
+          # so set it here.
+          VARIANT: ${{ inputs.variant }}
           USE_GITHUB_TOKEN: 'true'
           SHARE: 'false'
           MENTIONS: '/oc,/opencode'
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           GITHUB_TOKEN: ${{ github.token }}
