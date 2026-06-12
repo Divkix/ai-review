@@ -57,12 +57,12 @@ Open a pull request against the branch your caller workflow watches. Within a mi
 
 ## Versioning
 
-Callers pin `@v1`. Tag releases of this repo. When cutting v2, bump every internal `v1`/`@v1` pin:
+**Alpha.** Callers pin an exact release tag (currently `@v0.0.2`), not a floating major — the API is still changing. Tag releases of this repo; when cutting a new one, bump every internal pin to the new tag (the **pins** CI job fails if any are out of sync):
 
-1. `.github/workflows/review.yml` — tooling checkout `ref: v1` in the `static` job and the `llm-review` job (2 occurrences).
-2. `.github/workflows/commands.yml` — tooling checkout `ref: v1`.
-3. `.github/workflows/commands.yml` — nested `uses: divkix/ai-review/.github/workflows/review.yml@v1` cross-workflow ref.
-4. `templates/caller-review.yml` and `templates/caller-commands.yml` — the `uses: ...@v1` lines in both templates.
+1. `.github/workflows/review.yml` — tooling checkout `ref:` in the `static`, `llm-review`, and `finalize` jobs (3 occurrences).
+2. `.github/workflows/commands.yml` — tooling checkout `ref:`.
+3. `.github/workflows/commands.yml` — nested `uses: divkix/ai-review/.github/workflows/review.yml@<tag>` cross-workflow ref.
+4. `templates/caller-review.yml` and `templates/caller-commands.yml` — the `uses: ...@<tag>` lines in both templates.
 
 ## Security model
 

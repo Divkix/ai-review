@@ -122,8 +122,8 @@ jobs:
       security-events: write
     # NOTE: a relative `./.github/workflows/review.yml` ref would resolve in
     # the CALLER's repo (this workflow runs in the caller's context), so the
-    # absolute ref is required. Bump @v1 on release.
-    uses: divkix/ai-review/.github/workflows/review.yml@v1
+    # absolute ref is required. Bump the pinned tag on release.
+    uses: divkix/ai-review/.github/workflows/review.yml@v0.0.2
     with:
       mode: ${{ needs.route.outputs.cmd == 'review_full' && 'full' || 'incremental' }}
       pr_number: ${{ needs.route.outputs.number }}
@@ -152,7 +152,7 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           repository: divkix/ai-review
-          ref: v1 # bump on release
+          ref: v0.0.2 # bump on release
           path: .ai-review-tooling
           persist-credentials: false
 

@@ -26,5 +26,5 @@ jobs:
       pull-requests: write
       issues: write
       security-events: write
-    uses: divkix/ai-review/.github/workflows/review.yml@v1
+    uses: divkix/ai-review/.github/workflows/review.yml@v0.0.2
     secrets: inherit

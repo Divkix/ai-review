@@ -62,19 +62,20 @@ elif [ "$fail" -eq 0 ]; then
   fi
 fi
 
-# --- 4: internal version-pin major consistency ------------------------------
-# Match real pin contexts only: `ref: vN` (checkout/uses refs) and
-# `uses: …@vN` (reusable-workflow refs). Anchoring `uses:` avoids matching
-# `@vN` mentioned in prose comments.
-mapfile -t majors < <(grep -rhoE '(ref: v[0-9]+|uses:[^#]*@v[0-9]+)' \
+# --- 4: internal version-pin consistency ------------------------------------
+# Match real pin contexts only: `ref: vX[.Y.Z]` (checkout/uses refs) and
+# `uses: …@vX[.Y.Z]` (reusable-workflow refs). Anchoring `uses:` avoids
+# matching version strings mentioned in prose comments. Every internal pin
+# must reference the SAME tag, so a half-finished release bump can't ship.
+mapfile -t pins < <(grep -rhoE '(ref: v[0-9]+(\.[0-9]+)*|uses:[^#]*@v[0-9]+(\.[0-9]+)*)' \
   .github/workflows/*.yml templates/*.yml \
-  | grep -oE 'v[0-9]+' | sort -u)
-if [ "${#majors[@]}" -eq 0 ]; then
+  | grep -oE 'v[0-9]+(\.[0-9]+)*' | sort -u)
+if [ "${#pins[@]}" -eq 0 ]; then
   err "no internal vN pins found"
-elif [ "${#majors[@]}" -ne 1 ]; then
-  err "mixed internal version pins (half-finished release bump?): ${majors[*]}"
+elif [ "${#pins[@]}" -ne 1 ]; then
+  err "mixed internal version pins (half-finished release bump?): ${pins[*]}"
 else
-  echo "internal pin major: ${majors[0]}"
+  echo "internal pin: ${pins[0]}"
 fi
 
 if [ "$fail" -ne 0 ]; then
