@@ -477,33 +477,9 @@ jobs:
       - name: Merge SARIF into findings.json
         run: |
           set -euo pipefail
-          merge() {
-            local tool="$1" file="$2"
-            [ -f "$file" ] || return 0
-            jq --arg tool "$tool" '
-              [.runs[]?.results[]? | {
-                tool: $tool,
-                ruleId: (.ruleId // "unknown"),
-                file: (.locations[0].physicalLocation.artifactLocation.uri // ""),
-                startLine: (.locations[0].physicalLocation.region.startLine // 0),
-                endLine: (.locations[0].physicalLocation.region.endLine
-                          // .locations[0].physicalLocation.region.startLine // 0),
-                message: (.message.text // ""),
-                severity: (
-                  if .level == "error" then "HIGH"
-                  elif .level == "warning" then "MEDIUM"
-                  elif .level == "note" then "LOW"
-                  elif $tool == "osv" then "HIGH"
-                  elif $tool == "gitleaks" then "HIGH"
-                  else "MEDIUM"
-                  end)
-              }]' "$file"
-          }
-          {
-            merge opengrep opengrep.sarif
-            merge gitleaks gitleaks.sarif
-            merge osv osv.sarif
-          } | jq -s 'add // []' > findings.json
+          # shellcheck source=scripts/lib/sarif.sh
+          . .ai-review-tooling/scripts/lib/sarif.sh
+          sarif_merge opengrep:opengrep.sarif gitleaks:gitleaks.sarif osv:osv.sarif > findings.json
           jq length findings.json
 
       - name: Upload findings artifact
@@ -529,6 +505,17 @@ jobs:
         with:
           ref: ${{ needs.gate.outputs.head_sha }}
           fetch-depth: 0
+          persist-credentials: false
+
+      # Bump ref when releasing v2 of divkix/ai-review. Checked out so the
+      # context job can source scripts/lib/context.sh; into a subpath so it
+      # never disturbs the PR-head working tree.
+      - name: Checkout ai-review tooling (lib)
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          repository: divkix/ai-review
+          ref: v0.0.3
+          path: .ai-review-tooling
           persist-credentials: false
 
       - name: Fetch base ref
@@ -561,6 +548,8 @@ jobs:
         run: |
           set -euo pipefail
           command -v rg >/dev/null || { echo "::error::ripgrep (rg) is not installed; impact map would be silently empty"; exit 1; }
+          # shellcheck source=scripts/lib/context.sh
+          . .ai-review-tooling/scripts/lib/context.sh
           if [ "$MODE" = incremental ] && [ -n "$LAST_SHA" ] \
             && git cat-file -e "${LAST_SHA}^{commit}" 2>/dev/null; then
             range="${LAST_SHA}...HEAD"
@@ -568,39 +557,7 @@ jobs:
             range="origin/${BASE_REF}...HEAD"
           fi
           echo "Impact range: $range"
-          git diff --name-only -z "$range" > /tmp/changed.z
-          # Common keywords/types across mainstream languages; mining them as
-          # "symbols" would grep half the repo for nothing.
-          stopwords='^(if|else|elif|for|while|do|switch|case|break|continue|return|function|func|def|class|struct|enum|interface|type|import|export|from|package|module|const|let|var|val|public|private|protected|static|final|async|await|yield|new|delete|this|self|super|null|nil|none|true|false|try|catch|except|finally|throw|throws|raise|with|use|using|namespace|void|int|float|double|bool|boolean|string|char|byte|long|short|unsigned|signed|auto|template|typename|require|include|pragma|define|undef|error|warning|default|extends|implements|abstract|override|virtual|inline|extern|register|volatile|sizeof|typeof|instanceof|and|or|not|in|is|as|where|when|match|loop|impl|trait|crate|mod|pub|ref|mut|dyn|move|unsafe|defer|chan|select|range|map|print|println|printf|console|log|test|describe|expect|assert|main|init|len|cap|err|ctx|args|kwargs)$'
-          {
-            echo "# Impact map (auto-generated, heuristic)"
-            echo
-            echo "For each changed file: identifiers touched by the diff and where they are referenced elsewhere in the repo. Leads, not proof — open the files to verify."
-            echo
-            while IFS= read -r -d '' f; do
-              [ -f "$f" ] || continue
-              case "$f" in
-                *.lock|*.sum|*-lock.json|*.min.*|*.svg|*.map) continue ;;
-              esac
-              echo "## $f"
-              syms=$(git diff "$range" -- "$f" \
-                | grep -E '^[+-][^+-]' \
-                | grep -oE '\b[A-Za-z_][A-Za-z0-9_]{2,}\b' \
-                | grep -ivE "$stopwords" \
-                | sort | uniq -c | sort -rn | awk '{print $2}' | head -30 || true)
-              for s in $syms; do
-                hits=$(rg -n --no-heading -w -F "$s" \
-                        --glob '!.git' --glob '!*.lock' --glob '!*-lock.json' --glob '!*.min.*' \
-                        2>/dev/null | grep -v -F "$f:" | head -5 || true)
-                if [ -n "$hits" ]; then
-                  # shellcheck disable=SC2016
-                  printf -- '- `%s` referenced in:\n' "$s"
-                  printf '%s\n' "$hits" | sed 's/^/    /'
-                fi
-              done
-              echo
-            done < /tmp/changed.z
-          } > context.md
+          context_build_map "$range" > context.md
           # Hard cap so a huge PR can't blow the prompt/token budget.
           head -c 60000 context.md > context.trunc && mv context.trunc context.md
           wc -c context.md

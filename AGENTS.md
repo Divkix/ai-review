@@ -4,7 +4,7 @@
 This repo is a reusable GitHub Actions AI PR reviewer — no application runtime, all logic lives in workflows plus a small shell/Python toolkit.
 - `.github/workflows/` — `review.yml` (gate→static→context→llm-review→finalize), `commands.yml` (`/review`, `/plan`, `/oc` router), `ci.yml` (this repo's own static checks).
 - `prompts/` — LLM playbooks (`review-full.md`, `review-incremental.md`, `plan.md`). Their `$VAR` contract must match the workflows' `env:` blocks.
-- `scripts/lib/reconcile.sh` — pure, unit-tested baseline/state/thread logic the workflows `source` (single source of truth, no copy drift).
+- `scripts/lib/reconcile.sh`, `scripts/lib/sarif.sh`, `scripts/lib/context.sh` — pure, unit-tested logic the workflows `source` (single source of truth, no copy drift): baseline/state/thread reconciliation, SARIF merge, and cross-file impact-map building.
 - `scripts/check-pins.sh`, `scripts/check-contract.py` — invariant guards run in CI.
 - `tests/` — `reconcile.bats` + JSON fixtures. `templates/` — caller workflows for target repos. `rules/` — extra OpenGrep rules.
 
@@ -16,10 +16,10 @@ Run all checks in one command: `make check` (runs lint, tests, contract, and pin
 
 Individual commands:
 - `actionlint .github/workflows/*.yml` — lint workflows (bundles shellcheck on every `run:` block).
-- `bats tests/reconcile.bats` — unit-test the reconcile library.
+- `bats tests/` — unit-test the lib scripts (reconcile, sarif, context).
 - `python3 scripts/check-contract.py` — verify prompt env vars, template permission supersets, and the gate↔lib regex drift-guard.
 - `scripts/check-pins.sh` — assert opencode version/sha256 sync + live asset hash; offline with `CHECK_PINS_OFFLINE=1`.
-- `shellcheck scripts/check-pins.sh scripts/release.sh scripts/lib/reconcile.sh` — lint shell.
+- `shellcheck scripts/check-pins.sh scripts/release.sh scripts/lib/*.sh` — lint shell.
 
 ## Coding Style & Naming Conventions
 - Shell: `bash` with `set -euo pipefail`; 2-space indent; `snake_case` functions/vars. Keep `# shellcheck disable=` directives immediately above the offending line (actionlint ignores file-top directives).
