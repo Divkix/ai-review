@@ -57,11 +57,11 @@ Open a pull request against the branch your caller workflow watches. Within a mi
 
 ## Versioning
 
-**Alpha.** Callers pin an exact release tag (currently `@v0.0.3`), not a floating major — the API is still changing. Tag releases of this repo; when cutting a new one, run `scripts/release.sh <tag>` (bumps every internal pin and re-verifies); locations it touches:
+**Alpha.** Callers pin an exact release tag (currently `@v0.1.0`), not a floating major — the API is still changing. Tag releases of this repo; when cutting a new one, run `scripts/release.sh <tag>` (bumps every internal pin and re-verifies); locations it touches:
 
-**Migration**: next tag: rename your repo secret `DEEPSEEK_API_KEY` → `LLM_API_KEY`.
+**Migration to v0.1.0**: rename your repo secret `DEEPSEEK_API_KEY` → `LLM_API_KEY`.
 
-1. `.github/workflows/review.yml` — tooling checkout `ref:` in the `static`, `llm-review`, and `finalize` jobs (3 occurrences).
+1. `.github/workflows/review.yml` — tooling checkout `ref:` in the `static`, `context`, `llm-review`, and `finalize` jobs (4 occurrences).
 2. `.github/workflows/commands.yml` — tooling checkout `ref:`.
 3. `.github/workflows/commands.yml` — nested `uses: divkix/ai-review/.github/workflows/review.yml@<tag>` cross-workflow ref.
 4. `templates/caller-review.yml` and `templates/caller-commands.yml` — the `uses: ...@<tag>` lines in both templates.

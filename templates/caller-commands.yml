@@ -30,7 +30,7 @@ jobs:
       issues: write
       security-events: write
       id-token: write
-    uses: divkix/ai-review/.github/workflows/commands.yml@v0.0.3
+    uses: divkix/ai-review/.github/workflows/commands.yml@v0.1.0
     # with:
     #   model: openai/gpt-5
     #   variant: high
