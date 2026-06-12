@@ -24,7 +24,7 @@ Individual commands:
 ## Coding Style & Naming Conventions
 - Shell: `bash` with `set -euo pipefail`; 2-space indent; `snake_case` functions/vars. Keep `# shellcheck disable=` directives immediately above the offending line (actionlint ignores file-top directives).
 - Python: 3.12, standard library + `pyyaml`; 4-space indent; type hints; `snake_case`.
-- Workflows: pin third-party actions by commit SHA; pin the opencode CLI by version **and** sha256 (update all 3 copies together). Pass untrusted input via `env:`, never interpolated into `run:`.
+- Workflows: pin third-party actions by commit SHA; pin every fetched tool binary by version **and** sha256 (opencode has 3 copies — update them together); the OpenGrep ruleset is pinned by commit (`OPENGREP_RULES_REF`). Pass untrusted input via `env:`, never interpolated into `run:`.
 
 ## Testing Guidelines
 Add a `bats` case for any change to `reconcile.sh`; name tests `area: scenario -> expectation`. Put new fixtures in `tests/fixtures/`. Run the full local set (`bats`, `check-contract.py`, `check-pins.sh`, `actionlint`) before pushing — CI runs the same four jobs on every push/PR.
