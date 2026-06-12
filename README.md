@@ -82,7 +82,7 @@ max_diff_lines: 20000     # optional; default 20 000
 
 ## Versioning
 
-**Alpha.** Callers pin an exact release tag (currently `@v0.1.0`), not a floating major — the API is still changing. Tag releases of this repo; when cutting a new one, run `scripts/release.sh <tag>` (bumps every internal pin and re-verifies); locations it touches:
+**Alpha.** Callers pin an exact release tag (currently `@v0.2.0`), not a floating major — the API is still changing. Tag releases of this repo; when cutting a new one, run `scripts/release.sh <tag>` (bumps every internal pin and re-verifies); locations it touches:
 
 **Migration to v0.1.0**: rename your repo secret `DEEPSEEK_API_KEY` → `LLM_API_KEY`.
 
