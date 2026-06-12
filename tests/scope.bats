@@ -327,3 +327,25 @@ ignore:
   [ "$status" -eq 0 ]
   [ "$(echo "$output" | jq 'length')" -eq 0 ]
 }
+
+# ---------------------------------------------------------------------------
+# workflow consumption smoke test
+# ---------------------------------------------------------------------------
+
+@test "parse: workflow consumption of absent keys is safe under set -euo pipefail" {
+  SCOPE_SH="$REPO_ROOT/scripts/lib/scope.sh"
+  run bash -c "
+    set -euo pipefail
+    source \"$SCOPE_SH\"
+    config_out=\"\$(scope_parse_config </dev/null)\"
+    max_files=\"\$(grep '^max_changed_files=' <<< \"\$config_out\" | cut -d= -f2- || true)\"
+    max_lines=\"\$(grep '^max_diff_lines=' <<< \"\$config_out\" | cut -d= -f2- || true)\"
+    : \"\${max_files:=400}\"
+    : \"\${max_lines:=20000}\"
+    echo \"max_files=\$max_files\"
+    echo \"max_lines=\$max_lines\"
+  "
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx 'max_files=400'
+  echo "$output" | grep -qx 'max_lines=20000'
+}

@@ -174,8 +174,8 @@ jobs:
             config_warning="⚠️ .ai-review.yml on ${BASE_REF} is malformed — using defaults."
             echo "config warning: $config_warning"
           fi
-          max_files="$(grep '^max_changed_files=' <<< "$config_out" | cut -d= -f2-)"
-          max_lines="$(grep '^max_diff_lines=' <<< "$config_out" | cut -d= -f2-)"
+          max_files="$(grep '^max_changed_files=' <<< "$config_out" | cut -d= -f2- || true)"
+          max_lines="$(grep '^max_diff_lines=' <<< "$config_out" | cut -d= -f2- || true)"
           # Apply defaults when keys absent or config invalid.
           : "${max_files:=400}"
           : "${max_lines:=20000}"
