@@ -64,7 +64,8 @@ for i in range(40):
   git commit -q -m "rename"
 
   # context_build_map with range from parent to HEAD
-  run bash -c 'source '"$REPO_ROOT"'/scripts/lib/context.sh; context_build_map "HEAD~1...HEAD"'
+  # Feed a.sh as stdin to exercise the hostile-stdin (non-tty) case on every platform
+  run bash -c 'source '"$REPO_ROOT"'/scripts/lib/context.sh; context_build_map "HEAD~1...HEAD" < a.sh'
   [ "$status" -eq 0 ]
   # b.sh should appear as a reference location for old_symbol_name
   echo "$output" | grep -q "b.sh"

@@ -55,10 +55,11 @@ context_build_map() {
       syms=$(git diff "$range" -- "$f" \
         | context_mine_symbols)
       for s in $syms; do
+        # </dev/null: rg with no path searches stdin when it's a file/pipe (e.g. under bats on CI); force tree search.
         hits=$(rg -n --no-heading -w -F "$s" \
                 --glob '!.git' --glob '!*.lock' --glob '!*-lock.json' --glob '!*.min.*' \
                 --glob '!.ai-review-tooling' \
-                2>/dev/null | grep -v -F "$f:" | head -5 || true)
+                </dev/null 2>/dev/null | grep -v -F "$f:" | head -5 || true)
         if [ -n "$hits" ]; then
           # shellcheck disable=SC2016
           printf -- '- `%s` referenced in:\n' "$s"
