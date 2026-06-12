@@ -5,8 +5,12 @@
 #   3. The pinned sha256 matches the actual release asset on GitHub
 #      (catches "bumped version, forgot to update the hash"). Skip with
 #      CHECK_PINS_OFFLINE=1.
+#   3b. Each scanner binary (OPENGREP, GITLEAKS, OSV_SCANNER, RIPGREP) has
+#       exactly one distinct VERSION and one distinct SHA256 in review.yml;
+#       OPENGREP_RULES_REF is a 40-char hex commit. Live mode verifies all
+#       four asset hashes.
 #   4. Every internal version pin (`ref: vN`, `@vN`) shares one major N, so a
-#      half-finished release bump can't ship.
+#       half-finished release bump can't ship.
 #
 # Run from the repo root: scripts/check-pins.sh
 set -euo pipefail
@@ -60,6 +64,80 @@ elif [ "$fail" -eq 0 ]; then
   else
     err "could not download pinned opencode asset v$ver (bad version pin?)"
   fi
+fi
+
+# --- 3b: scanner binary + rules-ref pin consistency -------------------------
+REVIEW_WF=.github/workflows/review.yml
+
+# Per-tool: assert exactly one distinct VERSION and one distinct SHA256.
+# URL templates use $ver below (set per-tool).
+declare -A TOOL_URL
+TOOL_URL[OPENGREP]="https://github.com/opengrep/opengrep/releases/download/v\${ver}/opengrep_manylinux_x86"
+TOOL_URL[GITLEAKS]="https://github.com/gitleaks/gitleaks/releases/download/v\${ver}/gitleaks_\${ver}_linux_x64.tar.gz"
+TOOL_URL[OSV_SCANNER]="https://github.com/google/osv-scanner/releases/download/v\${ver}/osv-scanner_linux_amd64"
+TOOL_URL[RIPGREP]="https://github.com/BurntSushi/ripgrep/releases/download/\${ver}/ripgrep-\${ver}-x86_64-unknown-linux-musl.tar.gz"
+
+for tool in OPENGREP GITLEAKS OSV_SCANNER RIPGREP; do
+  mapfile -t tool_versions < <(grep -hoE "${tool}_VERSION=\"[^\"]+\"" "$REVIEW_WF" \
+    | sed -E 's/.*="([^"]+)"/\1/' | sort -u)
+  mapfile -t tool_shas < <(grep -hoE "${tool}_SHA256=\"[0-9a-f]+\"" "$REVIEW_WF" \
+    | sed -E 's/.*="([^"]+)"/\1/' | sort -u)
+  if [ "${#tool_versions[@]}" -eq 0 ]; then
+    err "no ${tool}_VERSION pin found in $REVIEW_WF"
+  elif [ "${#tool_versions[@]}" -ne 1 ]; then
+    err "${tool}_VERSION has multiple distinct values in $REVIEW_WF: ${tool_versions[*]}"
+  fi
+  if [ "${#tool_shas[@]}" -eq 0 ]; then
+    err "no ${tool}_SHA256 pin found in $REVIEW_WF"
+  elif [ "${#tool_shas[@]}" -ne 1 ]; then
+    err "${tool}_SHA256 has multiple distinct values in $REVIEW_WF: ${tool_shas[*]}"
+  fi
+  if [ "${#tool_versions[@]}" -eq 1 ] && [ "${#tool_shas[@]}" -eq 1 ]; then
+    echo "${tool,,} pins: version=${tool_versions[0]} sha=${tool_shas[0]:0:12}…"
+  fi
+done
+
+# Assert OPENGREP_RULES_REF is a 40-char hex commit.
+mapfile -t rules_refs < <(grep -hoE 'OPENGREP_RULES_REF="[^"]+"' "$REVIEW_WF" \
+  | sed -E 's/.*="([^"]+)"/\1/' | sort -u)
+if [ "${#rules_refs[@]}" -eq 0 ]; then
+  err "no OPENGREP_RULES_REF pin found in $REVIEW_WF"
+elif [ "${#rules_refs[@]}" -ne 1 ]; then
+  err "OPENGREP_RULES_REF has multiple distinct values: ${rules_refs[*]}"
+elif ! [[ "${rules_refs[0]}" =~ ^[0-9a-f]{40}$ ]]; then
+  err "OPENGREP_RULES_REF '${rules_refs[0]}' is not a 40-char hex commit"
+else
+  echo "opengrep-rules ref: ${rules_refs[0]}"
+fi
+
+# Live sha256 verification for each scanner binary (skip if offline).
+if [ "${CHECK_PINS_OFFLINE:-0}" = "1" ]; then
+  echo "CHECK_PINS_OFFLINE=1 — skipping live scanner sha256 verification"
+elif [ "$fail" -eq 0 ]; then
+  tmp_scanner="$(mktemp)"
+  trap 'rm -f "$tmp_scanner"' EXIT
+  for tool in OPENGREP GITLEAKS OSV_SCANNER RIPGREP; do
+    mapfile -t tv < <(grep -hoE "${tool}_VERSION=\"[^\"]+\"" "$REVIEW_WF" \
+      | sed -E 's/.*="([^"]+)"/\1/' | sort -u)
+    mapfile -t ts < <(grep -hoE "${tool}_SHA256=\"[0-9a-f]+\"" "$REVIEW_WF" \
+      | sed -E 's/.*="([^"]+)"/\1/' | sort -u)
+    ver="${tv[0]}"
+    want="${ts[0]}"
+    # Expand the URL template (uses $ver).
+    # shellcheck disable=SC2059
+    url="$(eval "echo \"${TOOL_URL[$tool]}\"")"
+    echo "fetching $url"
+    if curl -fsSL -o "$tmp_scanner" "$url"; then
+      got="$(sha256sum "$tmp_scanner" | cut -d' ' -f1)"
+      if [ "$got" != "$want" ]; then
+        err "pinned ${tool}_SHA256 ($want) != real asset sha256 ($got) for v$ver"
+      else
+        echo "live sha256 OK for ${tool,,} v$ver"
+      fi
+    else
+      err "could not download pinned ${tool,,} asset v$ver (bad version pin?)"
+    fi
+  done
 fi
 
 # --- 4: internal version-pin consistency ------------------------------------
