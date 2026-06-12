@@ -686,6 +686,8 @@ jobs:
           # shellcheck disable=SC2016  # literal backticks in the prompt text
           {
             cat "$playbook"
+            printf '\n\n'
+            cat ".ai-review-tooling/prompts/review-common.md"
             printf '\n## Run context\n\n'
             printf -- '- Repository: %s\n' "$GITHUB_REPOSITORY"
             printf -- '- PR number: %s (also in env `PR_NUMBER`)\n' "$PR_NUMBER"

@@ -30,38 +30,13 @@ You are an AI code reviewer. You run inside the checked-out repository with the 
 
 Run `git diff $LAST_SHA...$HEAD_SHA`. Use `git diff origin/$GITHUB_BASE_REF...HEAD` for full-PR context when a change only makes sense against the base.
 
-## Step 1.5 — Build cross-file context
-
-You have read-only repo tools (grep, read, glob). Before judging any change:
-
-1. Read the impact map at `$CONTEXT_PATH` — pre-computed leads on where the changed symbols are referenced elsewhere in the repo. Treat it as leads, not gospel: it is heuristic identifier matching, not a call graph.
-2. For any changed function, type, or exported symbol in the new range, confirm impact yourself:
-   - grep for call sites; open the most relevant ones.
-   - if a signature, return type, or behavior changed, verify each caller still holds. A caller that breaks is a BLOCKING finding (`evidence: caller-verified`).
-3. Spend retrieval only on changes that plausibly affect other code. Do not explore unrelated files; cap yourself to the diff's blast radius.
+> Step 1.5 (cross-file context), the classification rubric (Step 4), the self-critique pass (Step 4.5), posting mechanics, the thread-ID query, and the state contract are defined in the Shared review protocol appended below.
 
 ## Step 2 — Reconcile prior findings
 
 You do NOT resolve review threads or dismiss old reviews yourself — a deterministic workflow step does that after you finish, driven entirely by the state marker you write in Step 6.
 
-Parse `PRIOR_STATE_JSON`, then fetch the PR's live review threads via GraphQL — stored `threadId`s can be stale (force-pushes may delete and re-create thread nodes), so always match prior findings against the live list: by `threadId` when it appears there, otherwise by path + fingerprint/body. Also sweep live unresolved bot-authored threads that are missing from the state — treat them as prior findings too:
-
-```
-gh api graphql -f query='
-  query($owner: String!, $repo: String!, $number: Int!) {
-    repository(owner: $owner, name: $repo) {
-      pullRequest(number: $number) {
-        reviewThreads(last: 100) {
-          nodes {
-            id
-            isResolved
-            comments(first: 1) { nodes { path body databaseId } }
-          }
-        }
-      }
-    }
-  }' -f owner="<owner>" -f repo="<repo>" -F number="$PR_NUMBER"
-```
+Parse `PRIOR_STATE_JSON`, then fetch the PR's live review threads via GraphQL (see "Mapping inline comments to thread IDs" in the Shared review protocol appended below) — stored `threadId`s can be stale (force-pushes may delete and re-create thread nodes), so always match prior findings against the live list: by `threadId` when it appears there, otherwise by path + fingerprint/body. Also sweep live unresolved bot-authored threads that are missing from the state — treat them as prior findings too.
 
 For each prior finding, check whether the new commits fix it (inspect the file at HEAD and the incremental diff):
 
@@ -75,34 +50,6 @@ Review the `$LAST_SHA...$HEAD_SHA` range only:
 - Validate static findings from `$FINDINGS_PATH` that fall in the new range; filter false positives; never silently drop a CRITICAL/HIGH security finding — state reasoning in the walkthrough if dropping.
 - Look for logic bugs, edge cases, race conditions, API misuse, missing error handling, test gaps.
 
-## Step 4 — Classify every candidate finding
-
-For EACH candidate finding assign:
-
-- `severity`: `blocker` | `major` | `minor` | `nit`
-  - blocker: correctness bugs, security vulnerabilities, data loss risks.
-  - major: likely bug or significant defect, but survivable (e.g. unhandled edge case on a plausible input, swallowed error on a failure path).
-  - minor/nit: suggestions, readability, test gaps.
-- `confidence`: `high` | `medium` | `low`
-  - high: scanner-confirmed (also present in `$FINDINGS_PATH`) OR caller-verified (you opened the breaking call site).
-  - medium: a concrete logic/edge case you can articulate with the specific input that breaks it.
-  - low: style, preference, "consider…", "might want to…" — anything without proof.
-- `evidence`: `scanner-confirmed` | `caller-verified` | `logic-proof` | `opinion`
-
-Dedup within this review: N instances of the same issue/rule → ONE comment on the clearest instance, naming the pattern and "…and N−1 other places (file:line, file:line)".
-
-## Step 4.5 — Review your own review
-
-Before posting, re-read your candidate findings as a skeptical senior engineer and DELETE any that are:
-
-- not provable from the diff or a file you actually opened (speculation),
-- already handled elsewhere in the changed code (you missed the guard — go check),
-- style a linter would cover,
-- restating what the code obviously does,
-- duplicates of another finding (merge them).
-
-Keep a finding only if you'd stake your credibility on it. When unsure, cut it.
-
 ## Step 5 — Decide what to post, then post ONE review
 
 Posting budget:
@@ -112,21 +59,6 @@ Posting budget:
 - A finding dropped for low confidence is not mentioned at all — EXCEPT CRITICAL/HIGH security findings, which must still be surfaced (or explicitly dropped with reasoning) per Step 3.
 
 Verdict: `APPROVE` only if there are **no unfixed prior blocking findings AND no new posted blockers**; otherwise `REQUEST_CHANGES`.
-
-`POST /repos/{owner}/{repo}/pulls/{number}/reviews` via `gh api` with `event`, `body`, and `comments[]` (`path`, `line`, `side`). Write the whole payload as a single JSON file and pass it with `--input` (do not mix `-f` flags with `--input` — gh rejects that combination):
-
-```
-cat > "$RUNNER_TEMP/review.json" <<'EOF'
-{
-  "event": "REQUEST_CHANGES",
-  "body": "<walkthrough markdown>",
-  "comments": [
-    { "path": "src/file.ts", "line": 42, "side": "RIGHT", "body": "..." }
-  ]
-}
-EOF
-gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" --input "$RUNNER_TEMP/review.json"
-```
 
 ### Walkthrough format (review body)
 
@@ -165,7 +97,7 @@ Rewrite the bot's sticky status comment (id in env `STATUS_COMMENT_ID`, `PATCH /
 - `<range link>`: `[\`<short LAST_SHA>\`…\`<short HEAD_SHA>\`](https://github.com/$GITHUB_REPOSITORY/compare/$LAST_SHA...$HEAD_SHA)`.
 - `<VERDICT>`: `APPROVE` or `REQUEST_CHANGES` (whichever you posted).
 - `<TRIGGER_DESC>`: the value of env `TRIGGER_DESC`, verbatim (it may be a markdown link).
-- Both markers must be present, exactly as shown.
-- `lastSha`: env `HEAD_SHA`.
-- `findings`: merged list = prior **unfixed** findings + new findings posted in this review (`file`, `fingerprint` = ruleId or short hash of message, `threadId` if known). The state must contain ONLY still-open findings — the workflow resolves every bot thread whose id is absent, so omitting a live finding's `threadId` would wrongly resolve it.
-- Before writing the state, map the NEW inline comments posted in this run to thread IDs: rerun the `reviewThreads` GraphQL query from Step 2 and match each thread's first comment (path + body) to your new comments; store the matched `PRRT_…` node ID as `threadId` (or `null` if unmatched).
+
+Before writing the state, map the NEW inline comments posted in this run to thread IDs using the GraphQL query in the Shared review protocol appended below; match each thread's first comment (path + body) to your new comments; store the matched `PRRT_…` node ID as `threadId` (or `null` if unmatched).
+
+Follow the State marker contract in the Shared review protocol appended below.
