@@ -575,12 +575,29 @@ jobs:
           category: ai-review-osv
 
       - name: Merge SARIF into findings.json
+        env:
+          IGNORE_PATTERNS: ${{ needs.gate.outputs.ignore_patterns }}
         run: |
           set -euo pipefail
           # shellcheck source=scripts/lib/sarif.sh
           . .ai-review-tooling/scripts/lib/sarif.sh
+          # shellcheck source=.ai-review-tooling/scripts/lib/scope.sh
+          . .ai-review-tooling/scripts/lib/scope.sh
           sarif_merge opengrep:opengrep.sarif gitleaks:gitleaks.sarif osv:osv.sarif > findings.json
-          jq length findings.json
+          before="$(jq length findings.json)"
+          echo "findings before filter: $before"
+          # Filter findings forwarded to the LLM using CONFIG patterns only
+          # (built-ins are about diff noise, not findings — a HIGH in a lockfile
+          # must still flow to the LLM). SARIF uploads above are untouched.
+          if [ -n "$IGNORE_PATTERNS" ]; then
+            config_pats_file="$(mktemp /tmp/findings-pats.XXXXXX)"
+            printf '%s\n' "$IGNORE_PATTERNS" > "$config_pats_file"
+            scope_filter_findings "$config_pats_file" < findings.json > findings.filtered.json
+            mv findings.filtered.json findings.json
+            rm -f "$config_pats_file"
+          fi
+          after="$(jq length findings.json)"
+          echo "findings after filter: $after"
 
       - name: Upload findings artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
