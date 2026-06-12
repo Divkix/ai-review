@@ -1,0 +1,34 @@
+{
+  "runs": [
+    {
+      "results": [
+        {
+          "ruleId": "rule-001",
+          "level": "error",
+          "message": { "text": "Use of eval is dangerous" },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": { "uri": "src/foo.js" },
+                "region": { "startLine": 10, "endLine": 12 }
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "rule-002",
+          "level": "warning",
+          "message": { "text": "Prefer strict equality" },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": { "uri": "src/bar.js" },
+                "region": { "startLine": 42 }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

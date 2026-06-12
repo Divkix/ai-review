@@ -1,0 +1,20 @@
+{
+  "runs": [
+    {
+      "results": [
+        {
+          "ruleId": "generic-api-key",
+          "message": { "text": "Detected a Generic API Key" },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": { "uri": "config/settings.py" },
+                "region": { "startLine": 7, "endLine": 7 }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
