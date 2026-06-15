@@ -380,10 +380,12 @@ for i in range(40):
   # Disable global gitignore so test-specific paths aren't filtered
   git config core.excludesFile /dev/null
 
-  mkdir -p src generated
+  mkdir -p src generated keep
   printf 'def compute_value(x):\n    return x * 2\n' > src/compute.py
   printf 'from src.compute import compute_value\nresult = compute_value(5)\n' > generated/wrapper.py
-  git add src/compute.py generated/wrapper.py
+  # keep/legit.py also references compute_value — must SURVIVE (not be ignored)
+  printf 'from src.compute import compute_value\nresult = compute_value(10)\n' > keep/legit.py
+  git add src/compute.py generated/wrapper.py keep/legit.py
   git commit -q -m "initial"
 
   printf 'def compute_value(x, factor=2):\n    return x * factor\n' > src/compute.py
@@ -394,8 +396,12 @@ for i in range(40):
 
   run bash -c 'source '"$REPO_ROOT"'/scripts/lib/scope.sh; source '"$REPO_ROOT"'/scripts/lib/context.sh; context_build_map "HEAD~1...HEAD" "'"$BATS_TEST_TMPDIR/pats2"'"'
   [ "$status" -eq 0 ]
-  # generated/wrapper.py should be excluded from refs due to patterns-file
+  # generated/wrapper.py must be excluded from refs due to patterns-file
   ! echo "$output" | grep -q "generated/wrapper.py"
+  # keep/legit.py must SURVIVE — its reference to compute_value is not ignored
+  echo "$output" | grep -q "keep/legit.py"
+  # The ast-grep path must have run — "(AST)" label must appear in output
+  echo "$output" | grep -q "(AST)"
 }
 
 @test "ast: demux determinism — same input always same output" {

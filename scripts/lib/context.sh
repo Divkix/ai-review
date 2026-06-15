@@ -341,7 +341,9 @@ context_build_map() {
         # shellcheck disable=SC2086
         all_rules="$(context_sg_rules "$lang" "$def_kinds" "$ref_kinds" $syms)"
 
-        # Convert scope_rg_globs (--glob=PAT) to --globs PAT for ast-grep.
+        # Convert scope_rg_globs output to --globs PAT for ast-grep.
+        # scope_rg_globs emits TWO tokens per pattern: "--glob" then "!pat".
+        # Skip the "--glob" flag token and forward each "!pat" value.
         local sg_glob_args=()
         sg_glob_args+=("--globs" "!.git")
         sg_glob_args+=("--globs" "!*.lock")
@@ -350,9 +352,10 @@ context_build_map() {
         sg_glob_args+=("--globs" "!.ai-review-tooling")
         if [ "${#rg_pat_args[@]}" -gt 0 ]; then
           for _rg_arg in "${rg_pat_args[@]}"; do
-            # rg_pat_args contains lines like "--glob=!dist/**" — strip prefix
-            local _pat="${_rg_arg#--glob=}"
-            sg_glob_args+=("--globs" "$_pat")
+            case "$_rg_arg" in
+              --glob) continue ;;                          # skip the flag token
+              *) sg_glob_args+=("--globs" "$_rg_arg") ;;  # forward the "!pat" value
+            esac
           done
         fi
 
