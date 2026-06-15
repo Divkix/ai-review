@@ -348,3 +348,44 @@ itself is small.
    per-repo config file involves GitHub's Code Scanning API scoping, which is
    out of scope for v0. Recommend: keep suppression LLM-only in v0; revisit in
    v1 if callers ask for it.
+
+---
+
+## Addendum: `instructions:` and `guidelines:` (Plan 011)
+
+**Status**: implemented (feat/plan-011-instructions branch).
+
+Two new keys added to the schema (version stays 1; unknown keys are forward-ignored by older parsers):
+
+```yaml
+instructions:
+  - "api/** :: Flag handlers missing input validation."
+  - "Prefer explicit error wrapping."
+guidelines: docs/review-guidelines.md
+```
+
+### `instructions:` (list of strings)
+
+Same YAML block shape as `ignore:`. Parsed by the shared `scope_parse_list` helper in `scope.sh`. Each item:
+- Delimiter ` :: ` (space-colon-colon-space) splits glob from text. Items without the delimiter are repo-wide.
+- Text is truncated to 500 characters.
+- Empty or missing items are skipped — NOT `valid=false`. This is intentional: instructions are guidance, not schema enforcement. Degrading individual items prevents one bad line from invalidating the whole config and silencing all review.
+
+The gate emits them as an `instructions` heredoc output (newline-joined). The prompt-compose step renders them as a `## Per-repo review instructions` markdown section appended to both the drafter and verifier prompts.
+
+### `guidelines:` (scalar path)
+
+A relative path to a long-form review guidelines file in the repo. Validation:
+- Must not start with `/`
+- Must contain no `..` segment (neither `..` as the full path nor `/../` embedded)
+- On any validation failure: silently skip (emit nothing, do NOT set `valid=false`)
+
+Fetched from the base branch via the Contents API (`?ref=${BASE_REF}`, same pattern as `.ai-review.yml` itself). Capped at 16 384 bytes; if the raw content exceeds that, the injected text ends with `\n... [guidelines truncated]`. On fetch failure (404, network error): empty output, silent fail-open — no `config_warning` emitted.
+
+### Base-branch trust (same as all other keys)
+
+Both keys are read exclusively from the base branch — the same absolute rule as §1. A PR author cannot inject instructions or guidelines by modifying the PR head. The PR adding these keys to the base branch is itself reviewed under the prior (or absent) config — same as branch protection rules.
+
+### Interaction with existing keys
+
+`instructions:` does not change what the scanners report or what `ignore:` filters. An `instructions:` directive cannot suppress a CRITICAL/HIGH static finding. It is additional guidance injected into the LLM's context, not a gate condition.
