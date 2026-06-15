@@ -1,0 +1,4 @@
+# Neutral hadolint config vendored by ai-review.
+# No rules are ignored — this file exists purely to prevent hadolint from
+# reading a .hadolint.yaml committed in the PR head (config isolation, D5).
+ignored: []

@@ -742,9 +742,13 @@ jobs:
         if: contains(needs.gate.outputs.stacks, 'jsts')
         run: |
           set -euo pipefail
+          # -c "$RUNNER_TEMP/oxlint-empty.json": pass an empty JSON config generated outside the
+          #   PR tree — prevents oxlint from auto-discovering .oxlintrc.json from the PR head,
+          #   which an attacker could use to silence its own findings (config isolation, D5).
+          #   Note: --disable-nested-config alone does NOT defeat a root-level config file.
           # --format=sarif: emit SARIF to stdout (exits 0 even with findings).
-          # Zero-config defaults are correctness-only rules; no config flag needed.
-          oxlint --format=sarif . > oxlint.sarif
+          printf '{}' > "$RUNNER_TEMP/oxlint-empty.json"
+          oxlint -c "$RUNNER_TEMP/oxlint-empty.json" --format=sarif . > oxlint.sarif
 
       - name: Upload oxlint SARIF
         if: ${{ !cancelled() && hashFiles('oxlint.sarif') != '' }}
@@ -779,10 +783,12 @@ jobs:
             echo "no Dockerfile-like files found — skipping"
             exit 0
           fi
-          # --no-fail: findings do not exit non-zero.
-          # --no-config: do not read .hadolint.yaml from PR head (D5).
+          # --no-fail: findings do not exit non-zero (belt-and-braces; || true is the outer guard).
+          # -c .ai-review-tooling/rules/hadolint.yaml: vendored neutral config — prevents hadolint
+          #   from reading a .hadolint.yaml committed in the PR head (config isolation, D5).
+          #   Note: hadolint v2.14.0 has no --no-config flag; the vendored config is the correct approach.
           # --format sarif: native SARIF output.
-          hadolint --no-fail --no-config --format sarif "${docker_files[@]}" > hadolint.sarif
+          hadolint --no-fail -c .ai-review-tooling/rules/hadolint.yaml --format sarif "${docker_files[@]}" > hadolint.sarif || true
 
       - name: Upload hadolint SARIF
         if: ${{ !cancelled() && hashFiles('hadolint.sarif') != '' }}
@@ -849,7 +855,10 @@ jobs:
           # --format=sarif: native SARIF output.
           # --no-online-audits: fully hermetic (no network, no token consumed).
           # --no-exit-codes: exit 0 always (findings have severity-coded exit codes 10-14).
-          zizmor --format=sarif --no-online-audits --no-exit-codes .github/ > zizmor.sarif
+          # --no-config: prevents auto-discovery of zizmor.yml from the PR head — a committed
+          #   config could suppress HIGH/error findings via rules.<id>.ignore (config isolation, D5).
+          #   Note: zizmor v1.25.2 has --no-config; this was verified to restore suppressed findings.
+          zizmor --format=sarif --no-online-audits --no-exit-codes --no-config .github/ > zizmor.sarif
 
       - name: Upload zizmor SARIF
         if: ${{ !cancelled() && hashFiles('zizmor.sarif') != '' }}

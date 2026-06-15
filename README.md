@@ -37,7 +37,7 @@ flowchart LR
 
 **Stack detection**: the gate job detects which technology stacks appear in the PR's changed files and emits a `stacks` output (space-separated tokens: `python go jsts shell docker actions iac`). Each language-specific scanner runs only when its stack token is present, saving time on unrelated PRs.
 
-**Config isolation (D5)**: scanners ignore tool config files in the PR head — `ruff --isolated`, `shellcheck --norc`, `golangci-lint --no-config`, `hadolint --no-config`. actionlint's `.github/actionlint.yaml` (runner labels only) is an accepted exception.
+**Config isolation (D5)**: scanners ignore tool config files in the PR head — `ruff --isolated`, `shellcheck --norc`, `golangci-lint --no-config`, `hadolint -c .ai-review-tooling/rules/hadolint.yaml` (vendored neutral config; v2.14.0 has no `--no-config` flag), `oxlint -c $RUNNER_TEMP/oxlint-empty.json` (empty JSON generated at runtime outside the PR tree), `zizmor --no-config`. actionlint's `.github/actionlint.yaml` (runner labels only) is an accepted exception.
 
 **Decided alternates** (not in default roster): kube-linter (K8s best-practice checks; mostly subsumed by trivy's kubernetes scanner — add if callers are K8s-heavy and want probe/resource-limit findings), rumdl (markdown linter; findings are stylistic, lower review-signal — add once the tool stabilizes past 0.2.x), tflint (terraform lint-style checks; terraform slot covered by trivy's security checks — add if callers want deprecated-syntax/unused-declaration findings too).
 
