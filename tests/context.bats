@@ -134,3 +134,310 @@ for i in range(40):
   [ "$status" -eq 0 ]
   echo "$output" | grep -q "## a.sh"
 }
+
+# --- context_ast_lang ---------------------------------------------------
+
+@test "ast_lang: python extension maps correctly" {
+  run bash -c 'source '"$REPO_ROOT"'/scripts/lib/context.sh; context_ast_lang "foo.py"'
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "^python|"
+  echo "$output" | grep -q "function_definition"
+  echo "$output" | grep -q "call$"
+}
+
+@test "ast_lang: go extension maps correctly" {
+  run bash -c 'source '"$REPO_ROOT"'/scripts/lib/context.sh; context_ast_lang "path/to/service.go"'
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "^go|"
+  echo "$output" | grep -q "function_declaration"
+  echo "$output" | grep -q "call_expression"
+}
+
+@test "ast_lang: rust extension maps correctly" {
+  run bash -c 'source '"$REPO_ROOT"'/scripts/lib/context.sh; context_ast_lang "src/lib.rs"'
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "^rust|"
+  echo "$output" | grep -q "function_item"
+  echo "$output" | grep -q "call_expression"
+}
+
+@test "ast_lang: tsx extension maps correctly" {
+  run bash -c 'source '"$REPO_ROOT"'/scripts/lib/context.sh; context_ast_lang "Button.tsx"'
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "^tsx|"
+  echo "$output" | grep -q "jsx_opening_element"
+}
+
+@test "ast_lang: bash extensions map correctly" {
+  run bash -c 'source '"$REPO_ROOT"'/scripts/lib/context.sh; context_ast_lang "deploy.sh"'
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "^bash|"
+  echo "$output" | grep -q "function_definition"
+
+  run bash -c 'source '"$REPO_ROOT"'/scripts/lib/context.sh; context_ast_lang "run.bash"'
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "^bash|"
+}
+
+@test "ast_lang: unmapped extension -> empty output (rg fallback)" {
+  run bash -c 'source '"$REPO_ROOT"'/scripts/lib/context.sh; context_ast_lang "foo.java"'
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+
+  run bash -c 'source '"$REPO_ROOT"'/scripts/lib/context.sh; context_ast_lang "data.xml"'
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+# --- context_sg_rules ---------------------------------------------------
+
+@test "sg_rules: python rules have no leading --- and use identifier kind" {
+  run bash -c 'source '"$REPO_ROOT"'/scripts/lib/context.sh; context_sg_rules python "function_definition,class_definition" "call" "my_func"'
+  [ "$status" -eq 0 ]
+  # Must NOT start with ---
+  first_line="$(echo "$output" | head -1)"
+  [ "$first_line" != "---" ]
+  echo "$output" | grep -q "id: def--my_func"
+  echo "$output" | grep -q "id: ref--my_func"
+  echo "$output" | grep -q "kind: identifier"
+  echo "$output" | grep -q "field: name"
+}
+
+@test "sg_rules: rust rules use any:[identifier,type_identifier]" {
+  run bash -c 'source '"$REPO_ROOT"'/scripts/lib/context.sh; context_sg_rules rust "function_item,struct_item" "call_expression" "MyStruct"'
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "kind: type_identifier"
+  echo "$output" | grep -q "kind: identifier"
+}
+
+@test "sg_rules: bash rules use word kind for def and command_name for ref" {
+  run bash -c 'source '"$REPO_ROOT"'/scripts/lib/context.sh; context_sg_rules bash "function_definition" "command_name" "deploy_app"'
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "kind: word"
+  echo "$output" | grep -q "kind: command_name"
+  echo "$output" | grep -q "kind: command"
+}
+
+@test "sg_rules: multiple symbols get --- separator between rules" {
+  run bash -c 'source '"$REPO_ROOT"'/scripts/lib/context.sh; context_sg_rules python "function_definition" "call" "func_one" "func_two"'
+  [ "$status" -eq 0 ]
+  # 2 symbols * 2 rules each = 4 blocks; 3 separators between them
+  sep_count="$(echo "$output" | grep -c "^---" || true)"
+  [ "$sep_count" -eq 3 ]
+}
+
+@test "sg_rules: regex-special symbol is escaped" {
+  # Symbol with a dot (unusual but defensive) should be escaped
+  run bash -c 'source '"$REPO_ROOT"'/scripts/lib/context.sh; context_sg_rules python "function_definition" "call" "my.func"'
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "regex: .*my\\.func"
+}
+
+# --- ast-grep integration (gated on ast-grep binary) -------------------
+
+@test "ast: python def is found cross-file, not in changed file" {
+  command -v ast-grep || skip "ast-grep not installed"
+  cd "$BATS_TEST_TMPDIR"
+  git init -q pydef_repo && cd pydef_repo
+  git config user.email "t@t" && git config user.name "t"
+
+  # Initial: compute.py with function, caller.py referencing it
+  printf 'def compute_total(items, rate):\n    return sum(items) * rate\n' > compute.py
+  printf 'from compute import compute_total\nresult = compute_total([1,2,3], 0.1)\n' > caller.py
+  git add compute.py caller.py
+  git commit -q -m "initial"
+
+  # Change compute.py (add optional arg)
+  printf 'def compute_total(items, rate, discount=0):\n    return sum(items) * rate * (1 - discount)\n' > compute.py
+  git add compute.py
+  git commit -q -m "add discount"
+
+  run bash -c 'source '"$REPO_ROOT"'/scripts/lib/context.sh; context_build_map "HEAD~1...HEAD"'
+  [ "$status" -eq 0 ]
+  # Should find reference in caller.py
+  echo "$output" | grep -q "caller.py"
+  # The entry should use AST label
+  echo "$output" | grep -q "(AST)"
+  # compute.py itself should NOT appear in the refs (self-file excluded)
+  ! echo "$output" | grep -q "compute.py:.*referenced at"
+}
+
+@test "ast: javascript def/ref found cross-file" {
+  command -v ast-grep || skip "ast-grep not installed"
+  cd "$BATS_TEST_TMPDIR"
+  git init -q jsref_repo && cd jsref_repo
+  git config user.email "t@t" && git config user.name "t"
+
+  printf 'function processPayment(amount) { return amount; }\n' > payment.js
+  printf 'import { processPayment } from "./payment";\nconst r = processPayment(99);\n' > app.js
+  git add payment.js app.js
+  git commit -q -m "initial"
+
+  printf 'function processPayment(amount, currency) { return amount; }\n' > payment.js
+  git add payment.js
+  git commit -q -m "add currency"
+
+  run bash -c 'source '"$REPO_ROOT"'/scripts/lib/context.sh; context_build_map "HEAD~1...HEAD"'
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "app.js"
+  echo "$output" | grep -q "(AST)"
+}
+
+@test "ast: go precision — 'main' symbol finds only function def, not package decl" {
+  command -v ast-grep || skip "ast-grep not installed"
+  cd "$BATS_TEST_TMPDIR"
+  git init -q goprec_repo && cd goprec_repo
+  git config user.email "t@t" && git config user.name "t"
+
+  # package main + func main — lexical grep returns 2 lines; ast-grep returns 1 def
+  printf 'package main\n\nfunc main() {\n    processOrder()\n}\n' > main.go
+  printf 'package main\n\nfunc processOrder() {}\n' > order.go
+  git add main.go order.go
+  git commit -q -m "initial"
+
+  printf 'package main\n\nfunc main() {\n    processOrder()\n    cleanup()\n}\n' > main.go
+  printf 'package main\n\nfunc processOrder() {}\nfunc cleanup() {}\n' > order.go
+  git add main.go order.go
+  git commit -q -m "add cleanup"
+
+  run bash -c 'source '"$REPO_ROOT"'/scripts/lib/context.sh; context_build_map "HEAD~1...HEAD"'
+  [ "$status" -eq 0 ]
+  # cleanup is the new symbol changed in order.go; it should appear as referenced in main.go
+  echo "$output" | grep -q "main.go"
+  echo "$output" | grep -q "(AST)"
+}
+
+@test "ast: rust def/ref found" {
+  command -v ast-grep || skip "ast-grep not installed"
+  cd "$BATS_TEST_TMPDIR"
+  git init -q rsref_repo && cd rsref_repo
+  git config user.email "t@t" && git config user.name "t"
+
+  printf 'fn calculate_hash(data: &[u8]) -> u32 { data.len() as u32 }\n' > hash.rs
+  printf 'mod hash;\nfn main() { let h = hash::calculate_hash(&[1,2,3]); }\n' > main.rs
+  git add hash.rs main.rs
+  git commit -q -m "initial"
+
+  printf 'fn calculate_hash(data: &[u8], seed: u32) -> u32 { data.len() as u32 + seed }\n' > hash.rs
+  git add hash.rs
+  git commit -q -m "add seed"
+
+  run bash -c 'source '"$REPO_ROOT"'/scripts/lib/context.sh; context_build_map "HEAD~1...HEAD"'
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "main.rs"
+  echo "$output" | grep -q "(AST)"
+}
+
+@test "ast: bash def/ref found" {
+  command -v ast-grep || skip "ast-grep not installed"
+  cd "$BATS_TEST_TMPDIR"
+  git init -q bashref_repo && cd bashref_repo
+  git config user.email "t@t" && git config user.name "t"
+
+  printf '#!/usr/bin/env bash\ndeploy_service() { echo "deploying $1"; }\n' > deploy.sh
+  printf '#!/usr/bin/env bash\nsource ./deploy.sh\ndeploy_service myapp\n' > run.sh
+  git add deploy.sh run.sh
+  git commit -q -m "initial"
+
+  printf '#!/usr/bin/env bash\ndeploy_service() { echo "deploying $1 v2"; }\n' > deploy.sh
+  git add deploy.sh
+  git commit -q -m "update"
+
+  run bash -c 'source '"$REPO_ROOT"'/scripts/lib/context.sh; context_build_map "HEAD~1...HEAD"'
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "run.sh"
+  echo "$output" | grep -q "(AST)"
+}
+
+@test "ast: unmapped extension uses rg fallback unchanged" {
+  # .java is not in the curated set; rg fallback should run
+  cd "$BATS_TEST_TMPDIR"
+  git init -q javaref_repo && cd javaref_repo
+  git config user.email "t@t" && git config user.name "t"
+
+  printf 'public class Service {\n    public void handleRequest() {}\n}\n' > Service.java
+  printf 'public class Main {\n    Service s = new Service();\n    void run() { s.handleRequest(); }\n}\n' > Main.java
+  git add Service.java Main.java
+  git commit -q -m "initial"
+
+  printf 'public class Service {\n    public void handleRequest(String ctx) {}\n}\n' > Service.java
+  git add Service.java
+  git commit -q -m "add ctx"
+
+  # Even without ast-grep-mapped lang, rg fallback should find handleRequest in Main.java
+  run bash -c 'source '"$REPO_ROOT"'/scripts/lib/context.sh; context_build_map "HEAD~1...HEAD"'
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "Main.java"
+  # rg path does not emit "(AST)" label
+  ! echo "$output" | grep -q "(AST)"
+}
+
+@test "ast: honors patterns-file for ast-grep path" {
+  command -v ast-grep || skip "ast-grep not installed"
+  cd "$BATS_TEST_TMPDIR"
+  git init -q sgpats_repo && cd sgpats_repo
+  git config user.email "t@t" && git config user.name "t"
+  # Disable global gitignore so test-specific paths aren't filtered
+  git config core.excludesFile /dev/null
+
+  mkdir -p src generated
+  printf 'def compute_value(x):\n    return x * 2\n' > src/compute.py
+  printf 'from src.compute import compute_value\nresult = compute_value(5)\n' > generated/wrapper.py
+  git add src/compute.py generated/wrapper.py
+  git commit -q -m "initial"
+
+  printf 'def compute_value(x, factor=2):\n    return x * factor\n' > src/compute.py
+  git add src/compute.py
+  git commit -q -m "add factor"
+
+  printf 'generated/**\n' > "$BATS_TEST_TMPDIR/pats2"
+
+  run bash -c 'source '"$REPO_ROOT"'/scripts/lib/scope.sh; source '"$REPO_ROOT"'/scripts/lib/context.sh; context_build_map "HEAD~1...HEAD" "'"$BATS_TEST_TMPDIR/pats2"'"'
+  [ "$status" -eq 0 ]
+  # generated/wrapper.py should be excluded from refs due to patterns-file
+  ! echo "$output" | grep -q "generated/wrapper.py"
+}
+
+@test "ast: demux determinism — same input always same output" {
+  command -v ast-grep || skip "ast-grep not installed"
+  cd "$BATS_TEST_TMPDIR"
+  git init -q det_repo && cd det_repo
+  git config user.email "t@t" && git config user.name "t"
+
+  printf 'def transform_data(items):\n    return [x*2 for x in items]\n' > transform.py
+  printf 'from transform import transform_data\nresult1 = transform_data([1])\nresult2 = transform_data([2])\nresult3 = transform_data([3])\n' > app.py
+  git add transform.py app.py
+  git commit -q -m "initial"
+
+  printf 'def transform_data(items, scale=2):\n    return [x*scale for x in items]\n' > transform.py
+  git add transform.py
+  git commit -q -m "add scale"
+
+  run bash -c 'source '"$REPO_ROOT"'/scripts/lib/context.sh; context_build_map "HEAD~1...HEAD"'
+  [ "$status" -eq 0 ]
+  first_run="$output"
+
+  run bash -c 'source '"$REPO_ROOT"'/scripts/lib/context.sh; context_build_map "HEAD~1...HEAD"'
+  [ "$status" -eq 0 ]
+  [ "$output" = "$first_run" ]
+}
+
+@test "ast: composition smoke test under set -euo pipefail" {
+  command -v ast-grep || skip "ast-grep not installed"
+  cd "$BATS_TEST_TMPDIR"
+  git init -q smoke_repo && cd smoke_repo
+  git config user.email "t@t" && git config user.name "t"
+
+  printf 'def validate_input(data):\n    return bool(data)\n' > validator.py
+  printf 'from validator import validate_input\nok = validate_input("test")\n' > main.py
+  git add validator.py main.py
+  git commit -q -m "initial"
+
+  printf 'def validate_input(data, strict=False):\n    return bool(data) if not strict else len(data) > 0\n' > validator.py
+  git add validator.py
+  git commit -q -m "add strict"
+
+  run bash -c 'set -euo pipefail; source '"$REPO_ROOT"'/scripts/lib/context.sh; context_build_map "HEAD~1...HEAD"'
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "## validator.py"
+}

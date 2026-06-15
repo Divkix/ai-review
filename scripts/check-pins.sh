@@ -5,10 +5,11 @@
 #   3. The pinned sha256 matches the actual release asset on GitHub
 #      (catches "bumped version, forgot to update the hash"). Skip with
 #      CHECK_PINS_OFFLINE=1.
-#   3b. Each scanner binary (OPENGREP, GITLEAKS, OSV_SCANNER, RIPGREP) has
-#       exactly one distinct VERSION and one distinct SHA256 in review.yml;
-#       OPENGREP_RULES_REF is a 40-char hex commit. Live mode verifies all
-#       four asset hashes.
+#   3b. Each pinned binary (OPENGREP, GITLEAKS, OSV_SCANNER, RIPGREP, RUFF,
+#       GOLANGCI, OXLINT, SHELLCHECK, HADOLINT, ACTIONLINT, ZIZMOR, TRIVY,
+#       TYPOS, ASTGREP — 14 tools total) has exactly one distinct VERSION and
+#       one distinct SHA256 in review.yml; OPENGREP_RULES_REF is a 40-char hex
+#       commit. Live mode verifies all 14 asset hashes.
 #   4. Every internal version pin (`ref: vN`, `@vN`) shares one major N, so a
 #       half-finished release bump can't ship.
 #
@@ -71,7 +72,7 @@ REVIEW_WF=.github/workflows/review.yml
 
 # Single source-of-truth tool list — used by BOTH the consistency loop and the
 # live-verification loop below. Add/remove tools here only.
-TOOLS=(OPENGREP GITLEAKS OSV_SCANNER RIPGREP RUFF GOLANGCI OXLINT SHELLCHECK HADOLINT ACTIONLINT ZIZMOR TRIVY TYPOS)
+TOOLS=(OPENGREP GITLEAKS OSV_SCANNER RIPGREP RUFF GOLANGCI OXLINT SHELLCHECK HADOLINT ACTIONLINT ZIZMOR TRIVY TYPOS ASTGREP)
 
 # Per-tool: assert exactly one distinct VERSION and one distinct SHA256.
 # URL templates use $ver below (set per-tool).
@@ -89,6 +90,7 @@ TOOL_URL[ACTIONLINT]="https://github.com/rhysd/actionlint/releases/download/v\${
 TOOL_URL[ZIZMOR]="https://github.com/zizmorcore/zizmor/releases/download/\${ver}/zizmor-x86_64-unknown-linux-gnu.tar.gz"
 TOOL_URL[TRIVY]="https://github.com/aquasecurity/trivy/releases/download/v\${ver}/trivy_\${ver}_Linux-64bit.tar.gz"
 TOOL_URL[TYPOS]="https://github.com/crate-ci/typos/releases/download/\${ver}/typos-\${ver}-x86_64-unknown-linux-musl.tar.gz"
+TOOL_URL[ASTGREP]="https://github.com/ast-grep/ast-grep/releases/download/\${ver}/app-x86_64-unknown-linux-gnu.zip"
 
 for tool in "${TOOLS[@]}"; do
   mapfile -t tool_versions < <(grep -hoE "${tool}_VERSION=\"[^\"]+\"" "$REVIEW_WF" \
