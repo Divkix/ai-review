@@ -148,10 +148,25 @@ def check_drift_guard() -> None:
         err("review.yml gate inline parser diverged from reconcile.sh capture regex")
 
 
+# --- 4: gh api flag-misuse guard --------------------------------------------
+# `gh api` has no -o/--output flag (that is a curl-ism); using it makes gh print
+# usage and exit non-zero, silently breaking the deterministic review POST.
+# Caught only at runtime (CI has no token), so guard it statically here.
+GH_API_BAD_OUTPUT = re.compile(r"gh api\b(?:[^\n]*\\\n)*[^\n]*?\s-o\b")
+
+
+def check_gh_api_flags() -> None:
+    for wf in WORKFLOWS.glob("*.yml"):
+        if GH_API_BAD_OUTPUT.search(wf.read_text()):
+            err(f"{wf.name}: `gh api ... -o` is invalid (gh api has no -o flag); "
+                "redirect stdout with `> file` instead")
+
+
 def main() -> int:
     check_prompt_contract()
     check_permissions()
     check_drift_guard()
+    check_gh_api_flags()
     if errors:
         print(f"contract check FAILED ({len(errors)} issue(s))", file=sys.stderr)
         return 1

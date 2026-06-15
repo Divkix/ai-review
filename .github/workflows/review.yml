@@ -1613,7 +1613,7 @@ jobs:
           inline_posted=false
           if gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" \
               --input "$RUNNER_TEMP/review.json" \
-              -o "$RUNNER_TEMP/review-resp.json"; then
+              > "$RUNNER_TEMP/review-resp.json"; then
             inline_posted=true  # rung 1: inline comments posted as review threads
           else
             echo "::warning::Review POST failed (rung 1); degrading inline comments to minors block"
@@ -1626,7 +1626,7 @@ jobs:
             post_compose_review "$verdict" <<<"$degrade_input" > "$RUNNER_TEMP/review-degrade.json"
             if gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" \
                 --input "$RUNNER_TEMP/review-degrade.json" \
-                -o "$RUNNER_TEMP/review-resp.json"; then
+                > "$RUNNER_TEMP/review-resp.json"; then
               inline_posted=false  # rung 2: inline folded into minors block, no threads
             else
               # Rung 3: permission-class degrade — only when intended verdict is APPROVE.
@@ -1640,7 +1640,7 @@ jobs:
                 inline_posted=false  # rung 3: inline folded into minors block, no threads
                 gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" \
                   --input "$RUNNER_TEMP/review-comment2.json" \
-                  -o "$RUNNER_TEMP/review-resp.json" \
+                  > "$RUNNER_TEMP/review-resp.json" \
                   || { echo "::error::Review POST failed on all three rungs"; exit 1; }
               else
                 echo "::error::Review POST failed (rung 2); no further fallback for verdict $verdict"
