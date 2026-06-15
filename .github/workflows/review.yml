@@ -1182,10 +1182,11 @@ jobs:
           #         (permission-class degrade — only when intended verdict is APPROVE).
           # Each downgrade is logged with ::warning::; job fails if rung 3 exhausted.
           event_used="$verdict"
+          inline_posted=false
           if gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" \
               --input "$RUNNER_TEMP/review.json" \
               -o "$RUNNER_TEMP/review-resp.json"; then
-            : # rung 1 succeeded — nothing to do
+            inline_posted=true  # rung 1: inline comments posted as review threads
           else
             echo "::warning::Review POST failed (rung 1); degrading inline comments to minors block"
             degrade_input="$(jq -n \
@@ -1198,7 +1199,7 @@ jobs:
             if gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" \
                 --input "$RUNNER_TEMP/review-degrade.json" \
                 -o "$RUNNER_TEMP/review-resp.json"; then
-              : # rung 2 succeeded
+              inline_posted=false  # rung 2: inline folded into minors block, no threads
             else
               # Rung 3: permission-class degrade — only when intended verdict is APPROVE.
               if [ "$intended_verdict" = "APPROVE" ]; then
@@ -1208,6 +1209,7 @@ jobs:
                 new_body="$(printf '**Verdict: APPROVE** — posted as a comment because this repository does not allow GitHub Actions to approve pull requests.\n\n%s' "$orig_body")"
                 jq --arg b "$new_body" '.body = $b' "$RUNNER_TEMP/review-comment.json" > "$RUNNER_TEMP/review-comment2.json"
                 event_used="COMMENT"
+                inline_posted=false  # rung 3: inline folded into minors block, no threads
                 gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" \
                   --input "$RUNNER_TEMP/review-comment2.json" \
                   -o "$RUNNER_TEMP/review-resp.json" \
@@ -1279,10 +1281,16 @@ jobs:
           printf '%s\n' "$all_nodes2" > "$RUNNER_TEMP/threads-post.json"
 
           # Match posted inline comments to thread IDs.
-          # The review response contains the comments array.
-          jq '[.comments // [] | .[] | {path: .path, body: .body}]' \
-            "$RUNNER_TEMP/review-resp.json" > "$RUNNER_TEMP/posted-comments.json" 2>/dev/null \
-            || printf '[]' > "$RUNNER_TEMP/posted-comments.json"
+          # NOTE: POST /pulls/{n}/reviews returns a review object (id/state/body/user/etc.)
+          # with NO inline comments array — reading .comments from the response always yields
+          # null. Instead, match what we actually sent (valid_inline) against the freshly-
+          # fetched threads. On rung 2/3 inline comments were folded into the minors block
+          # and never posted as threads, so posted-comments must be [] there.
+          if [ "$inline_posted" = "true" ]; then
+            jq -c '[.[] | {path: .path, body: .body}]' <<<"$valid_inline" > "$RUNNER_TEMP/posted-comments.json"
+          else
+            printf '[]\n' > "$RUNNER_TEMP/posted-comments.json"
+          fi
           matched="$(post_match_threads "$RUNNER_TEMP/posted-comments.json" "$RUNNER_TEMP/threads-post.json")"
 
           # --- 9. Build state findings array -----------------------------------
@@ -1328,7 +1336,7 @@ jobs:
           if [ "$REVIEW_MODE" = "full" ]; then
             n_blocking="$(jq '[.findings // [] | .[] | select(.severity=="blocker" and (.confidence=="high" or .confidence=="medium"))] | length' "$RUNNER_TEMP/verified-fp.json")"
             n_major="$(jq '[.findings // [] | .[] | select(.severity=="major" and (.confidence=="high" or .confidence=="medium"))] | length' "$RUNNER_TEMP/verified-fp.json")"
-            n_minor="$(jq '(.minors // [] | length)' <<<"$(jq -n --argjson m "$all_minors" '{"minors":$m}')")"
+            n_minor="$(jq 'length' <<<"$all_minors")"
             if [ "$n_blocking" -eq 0 ] && [ "$n_major" -eq 0 ] && [ "$n_minor" -eq 0 ]; then
               summary="No findings."
             else

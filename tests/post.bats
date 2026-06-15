@@ -731,6 +731,66 @@ EOF
   echo "$output" | jq -e '. == []'
 }
 
+@test "match_threads: workflow posted-comments source: valid_inline matches thread, unmatched finding gets null threadId" {
+  # Regression guard for the mainline bug where the workflow read .comments from
+  # the create-review REST response (which never contains an inline comments array)
+  # instead of matching what was actually sent (valid_inline). That caused
+  # posted-comments.json to always be [], so post_match_threads returned all-null
+  # threadIds, and finalize never auto-resolved threads.
+  #
+  # This test mirrors the CORRECTED workflow pattern:
+  #   jq -c '[.[] | {path: .path, body: .body}]' <<<"$valid_inline" > posted-comments.json
+  # A regression back to reading .comments from the review response would produce
+  # an empty posted-comments.json, making both threadIds null (assertion on line 1
+  # would fail: threadId would be null instead of "PRRT_xyz123").
+
+  local posted threads valid_inline
+
+  # Fixture: valid_inline — 2 findings with path+body (as stored in the workflow variable)
+  valid_inline='[
+    {"path":"src/auth.py","line":5,"side":"RIGHT","body":"SQL injection risk here","severity":"blocker","confidence":"high","fingerprint":"abc123def456"},
+    {"path":"src/util.py","line":12,"side":"RIGHT","body":"Unused variable leaks memory","severity":"major","confidence":"medium","fingerprint":"def456abc123"}
+  ]'
+
+  # Derive posted-comments exactly as the corrected workflow does (NOT from .comments on the response).
+  posted="$BATS_TEST_TMPDIR/posted-comments.json"
+  jq -c '[.[] | {path: .path, body: .body}]' <<<"$valid_inline" > "$posted"
+
+  # Fixture: threads-post.json — one unresolved thread matching finding 1, one resolved
+  # thread whose body also matches finding 1 (should not be picked — resolved), and no
+  # thread matching finding 2 (threadId must be null).
+  threads="$BATS_TEST_TMPDIR/threads-post.json"
+  cat > "$threads" <<'EOF'
+[
+  {
+    "id": "PRRT_xyz123",
+    "isResolved": false,
+    "comments": {"nodes": [{"path":"src/auth.py","body":"SQL injection risk here","databaseId":201}]}
+  },
+  {
+    "id": "PRRT_resolved",
+    "isResolved": true,
+    "comments": {"nodes": [{"path":"src/auth.py","body":"SQL injection risk here","databaseId":202}]}
+  },
+  {
+    "id": "PRRT_other",
+    "isResolved": false,
+    "comments": {"nodes": [{"path":"src/other.py","body":"Unrelated finding","databaseId":203}]}
+  }
+]
+EOF
+
+  run post_match_threads "$posted" "$threads"
+  [ "$status" -eq 0 ]
+
+  # Finding 1 (src/auth.py) must match the unresolved thread PRRT_xyz123.
+  echo "$output" | jq -e 'map(select(.path == "src/auth.py")) | .[0].threadId == "PRRT_xyz123"'
+  # Finding 2 (src/util.py) has no matching thread -> threadId must be null.
+  echo "$output" | jq -e 'map(select(.path == "src/util.py")) | .[0].threadId == null'
+  # Resolved thread PRRT_resolved must not be matched even though body matches.
+  echo "$output" | jq -e '[.[] | select(.threadId == "PRRT_resolved")] | length == 0'
+}
+
 # ---------------------------------------------------------------------------
 # post_compose_state + round-trip with reconcile_state_from_comments
 # ---------------------------------------------------------------------------
