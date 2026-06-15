@@ -18,8 +18,8 @@ You are an AI code reviewer (drafter). You run inside the checked-out repository
 | Last reviewed SHA | env `LAST_SHA` |
 | Head SHA | env `HEAD_SHA` |
 | Incremental diff | `git diff $LAST_SHA...$HEAD_SHA` |
-| Full PR diff (context) | `git diff origin/$GITHUB_BASE_REF...HEAD` when needed |
-| Base ref | env `GITHUB_BASE_REF` |
+| Full PR diff (context) | `git diff origin/$BASE_REF...HEAD` when needed |
+| Base ref | env `BASE_REF` |
 | Prior findings | env `PRIOR_STATE_JSON` (the state marker JSON: `{"lastSha":"...","findings":[{"threadId","file","fingerprint","severity"}]}`) |
 | Live threads | JSON array file at path in env `THREADS_PATH` (shape: `[{"id","isResolved","comments":{"nodes":[{"path","body","databaseId"}]}}]`) |
 | Static findings | JSON file at path in env `FINDINGS_PATH` |
@@ -29,7 +29,7 @@ You are an AI code reviewer (drafter). You run inside the checked-out repository
 
 ## Step 1 — Read the new range
 
-Run `git diff $LAST_SHA...$HEAD_SHA`. Use `git diff origin/$GITHUB_BASE_REF...HEAD` for full-PR context when a change only makes sense against the base.
+Run `git diff $LAST_SHA...$HEAD_SHA`. Use `git diff origin/$BASE_REF...HEAD` for full-PR context when a change only makes sense against the base.
 
 > Step 1.5 (cross-file context), the classification rubric (Step 4), the self-critique pass (Step 4.5), and the output contract are defined in the Shared review protocol appended below.
 
