@@ -11,7 +11,7 @@ flowchart LR
     A[PR event] --> B[gate]
     B --> C[static scan<br/>opengrep + gitleaks + osv]
     B --> H[context<br/>cross-file impact map]
-    C --> D[LLM review<br/>opencode + DeepSeek]
+    C --> D[llm-review<br/>drafter → skeptic → post]
     H --> D
     D --> E[finalize<br/>resolve threads + dismiss]
     F[comment commands] --> G[command router]
@@ -21,7 +21,7 @@ flowchart LR
 - **Auto full review** when a PR is opened, with one sticky status comment (mode, commit links, trigger, verdict) updated in place — never one comment per push.
 - **Incremental review** on each push: reviews only the new commits, then a deterministic `finalize` job resolves fixed review threads via GraphQL and dismisses the bot's stale REQUEST_CHANGES review.
 - **Cross-file context**: a `context` job greps the repo for references to every symbol the diff touches and hands the LLM an impact map; the playbook makes the agent verify call sites before judging signature/behavior changes.
-- **Noise control**: every finding gets severity + confidence + evidence (scanner-confirmed and caller-verified rank highest), a self-critique pass deletes unproven findings, inline comments are budgeted to 10 blockers/majors, and minors collapse into one `<details>` block.
+- **Noise control**: every finding gets severity + confidence + evidence (scanner-confirmed and caller-verified rank highest). A dedicated **skeptic/verifier pass** tries to refute each draft finding against the actual code and drops unprovable ones. A **deterministic posting step** (workflow bash, not the LLM) then applies the inline budget (≤10 blockers/majors) and collapses minors into one `<details>` block — posting correctness does not depend on model compliance.
 - **Draft PRs** get a single "will start when ready" comment and are skipped until marked ready for review.
 - **State** lives in a hidden `<!-- ai-review:state ... -->` marker inside the sticky status comment, holding the last reviewed SHA and still-open finding fingerprints/thread ids — no database.
 
@@ -51,8 +51,8 @@ Open a pull request against the branch your caller workflow watches. Within a mi
 ## Customization
 
 - **Rules**: drop additional OpenGrep rules into `rules/` in this repo — they are loaded on top of the community pack ([opengrep/opengrep-rules](https://github.com/opengrep/opengrep-rules)). See `rules/example-no-console-log.yaml`. The community pack is pinned to a specific commit (`OPENGREP_RULES_REF` in `review.yml`); bump that value to pick up upstream rule changes.
-- **Prompts**: edit the playbooks in `prompts/` (`review-full.md`, `review-incremental.md`, `plan.md`) to tune review behavior, verdict policy, and comment formats. `review-common.md` is the shared protocol appended to both review modes — edit it to change shared policy (classification rubric, posting mechanics, state contract).
-- **Model**: set the `model`, `variant`, and `api_key_env` inputs in your caller workflow (see the commented-out `with:` block in the templates) — no fork needed. Default is `deepseek/deepseek-v4-pro` with `variant: max`; any [models.dev](https://models.dev) provider works with its corresponding `api_key_env`. The scaffolding (scanners, context, ranking, lifecycle) is model-agnostic; pointing it at a stronger model is the single biggest review-quality lever.
+- **Prompts**: edit the playbooks in `prompts/` (`review-full.md`, `review-incremental.md`, `review-verify.md`, `plan.md`) to tune review behavior, verdict policy, and comment formats. `review-common.md` is the shared protocol appended to both review modes — edit it to change shared policy (classification rubric, state contract). `review-verify.md` is the skeptic/verifier prompt.
+- **Model**: set the `model`, `variant`, and `api_key_env` inputs in your caller workflow (see the commented-out `with:` block in the templates) — no fork needed. Default is `deepseek/deepseek-v4-pro` with `variant: max`; any [models.dev](https://models.dev) provider works with its corresponding `api_key_env`. Use `verifier_model` and `verifier_variant` to run the skeptic pass on a different (e.g. stronger or cheaper) model. The scaffolding (scanners, context, ranking, lifecycle) is model-agnostic; pointing it at a stronger model is the single biggest review-quality lever.
 - **opencode CLI**: pinned by version + sha256 in the workflows (`OPENCODE_VERSION` in `review.yml` ×1 and `commands.yml` ×2). Bump both values together.
 
 ## Per-repo configuration
@@ -96,7 +96,7 @@ max_diff_lines: 20000     # optional; default 20 000
 - Commands are gated by `author_association` (OWNER/MEMBER/COLLABORATOR) and bot comments are rejected.
 - Untrusted content (comment bodies, issue titles/bodies, state JSON) is passed via `env:` only — never interpolated into `run:` scripts.
 - All third-party actions are pinned to commit SHAs; every fetched tool binary (opencode, opengrep, gitleaks, osv-scanner, ripgrep) is pinned by version + sha256, and the OpenGrep community ruleset is pinned to a commit (no install-latest-at-runtime).
-- Privilege separation: the job that feeds untrusted PR content to the LLM runs with `contents: read` (its token cannot push, even if prompt-injected); the `contents: write` required by GitHub's `resolveReviewThread` mutation lives only in the deterministic `finalize` job, which runs no LLM.
+- Privilege separation: the LLM drafter and skeptic steps run without a GitHub token (they write findings to local files only); the deterministic posting step within `llm-review` and the `finalize` job are the only steps that hold `github.token` and call the GitHub API — no LLM runs in those steps.
 - Scanners never fail the build; findings flow to the LLM as data.
 - Fork PRs receive no secrets (GitHub default), so the caller template skips them via a `head.repo == repository` condition (`LLM_API_KEY` would be empty); a collaborator can trigger `/review` on the PR instead.
 
@@ -106,7 +106,7 @@ max_diff_lines: 20000     # optional; default 20 000
 - **`finalize` job fails on `resolveReviewThread` with FORBIDDEN** — the caller job isn't granting `contents: write`. Reusable workflows can only downgrade, so the caller in `templates/` must keep the full `permissions:` superset (Setup step 2).
 - **Nothing happens when a PR opens** — check the caller workflow is on the PR's base branch, the PR is not a draft (drafts are skipped until "Ready for review"), and the PR is not from a fork (forks get no secrets and are skipped by design; a collaborator can run `/review` instead).
 - **`/oc` does nothing** — it needs the opencode GitHub App installed (Setup step 1); the other flows use the workflow token and don't.
-- **Review ran but no inline comments / verdict** — the LLM must follow the playbook to post the review and write the `<!-- ai-review:state -->` marker. If the model skips it, `finalize` has no state to act on. Pointing the workflows at a stronger model (see Customization) is the most reliable fix.
+- **Review ran but no inline comments / verdict** — the drafter or skeptic may have written an empty or malformed findings file. Check the `llm-review` job logs for the posting step's output; it will describe why it fell back or skipped. Pointing the workflows at a stronger model (see Customization) improves draft quality.
 - **First run is slow / scans the whole repo** — Gitleaks runs in full git mode on the first pass; subsequent runs are incremental.
 
 ## Limitations
@@ -115,7 +115,7 @@ max_diff_lines: 20000     # optional; default 20 000
 - No cross-PR memory; incremental state is per-PR.
 - Path filters use simplified glob matching (bash fnmatch, not full gitignore semantics) — advanced patterns like character classes or negation are not supported; see `docs/design/pr-scope-config.md`.
 - The `context` job is heuristic identifier grep, not a real call graph — expect occasional false leads, and on large repos the sweep adds latency.
-- Review *posting* (inline comments, verdict, state marker) still depends on the LLM following the playbook; only thread resolution/dismissal is deterministic.
+- Review posting (inline comments, verdict, state marker) is deterministic workflow bash (`scripts/lib/post.sh`); the LLM passes write candidate findings files, not GitHub API calls.
 - Gitleaks runs in full git mode, so the first run scans the whole repo history.
 
 ## Development
