@@ -10,8 +10,10 @@ cd "$(dirname "$0")/.."
 
 # --- arg validation ----------------------------------------------------------
 new_tag="${1:-}"
-if [[ ! "$new_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-  echo "usage: scripts/release.sh v<MAJOR>.<MINOR>.<PATCH>" >&2
+# Accept a stable vX.Y.Z tag or a pre-release vX.Y.Z-<suffix> (e.g. v0.3.0-rc.1),
+# so an rc can be cut for sandbox e2e validation before the final tag.
+if [[ ! "$new_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+  echo "usage: scripts/release.sh v<MAJOR>.<MINOR>.<PATCH>[-<prerelease>]" >&2
   exit 1
 fi
 
@@ -24,10 +26,12 @@ fi
 # --- detect current tag from anchored pin contexts ---------------------------
 pin_files=(.github/workflows/review.yml .github/workflows/commands.yml templates/caller-review.yml templates/caller-commands.yml)
 
+# Capture the FULL pin including any pre-release suffix so an rc->final bump
+# (e.g. v0.3.0-rc.1 -> v0.3.0) is detected as a real change, not a no-op.
 mapfile -t current_pins < <(grep -rhoE \
-  '(ref: v[0-9]+(\.[0-9]+)*|uses:[^#]*@v[0-9]+(\.[0-9]+)*)' \
+  '(ref: v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?|uses:[^#]*@v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?)' \
   "${pin_files[@]}" \
-  | grep -oE 'v[0-9]+(\.[0-9]+)*' | sort -u)
+  | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?' | sort -u)
 
 if [ "${#current_pins[@]}" -eq 0 ]; then
   echo "error: no internal version pins found in ${pin_files[*]}" >&2
