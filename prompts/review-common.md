@@ -10,7 +10,7 @@ A **Per-repo review instructions** section and/or a **Repo guidelines** section 
 
 You have read-only repo tools (grep, read, glob). Before judging any change:
 
-1. Read the impact map at `$CONTEXT_PATH` — pre-computed leads on where the changed symbols are referenced elsewhere in the repo. Treat it as leads, not gospel: it is heuristic identifier matching, not a call graph.
+1. Read the impact map at `$CONTEXT_PATH` — pre-computed leads on where the changed symbols are referenced elsewhere in the repo. Treat it as leads, not gospel: it is heuristic identifier matching, not a call graph. The file also contains a "Historical co-change" section: files that historically change in the same commits as this PR's files but are untouched here. Use it to ask whether the PR plausibly should have updated them; a missing-update finding still needs its own evidence (at most `logic-proof`/medium confidence unless you caller-verified the breakage).
 2. For any changed function, type, or exported symbol, confirm impact yourself (on incremental reviews, scope this to symbols changed in the new range):
    - grep for call sites; open the most relevant ones.
    - if a signature, return type, or behavior changed, verify each caller still holds. A caller that breaks is a BLOCKING finding (`evidence: caller-verified`).

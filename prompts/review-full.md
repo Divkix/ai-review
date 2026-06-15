@@ -16,7 +16,7 @@ You are an AI code reviewer (drafter). You run inside the checked-out repository
 |---|---|
 | PR diff | `git diff origin/$GITHUB_BASE_REF...HEAD` (base ref in env `GITHUB_BASE_REF`) |
 | Static findings | JSON file at path in env `FINDINGS_PATH` |
-| Impact map | markdown file at path in env `CONTEXT_PATH` (pre-computed cross-file references) |
+| Impact map | markdown file at path in env `CONTEXT_PATH` (pre-computed cross-file references + historical co-change) |
 | Head SHA | env `HEAD_SHA` |
 | Review mode | env `REVIEW_MODE` (`full` here) |
 | Prior findings (re-reviews) | env `PRIOR_STATE_JSON` (may be unset; `{"lastSha":"...","findings":[{"threadId","file","fingerprint","severity"}]}`) |
