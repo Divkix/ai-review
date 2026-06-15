@@ -106,6 +106,8 @@ jobs:
       ignore_patterns: ${{ steps.size_guard.outputs.ignore_patterns }}
       size_warning: ${{ steps.size_guard.outputs.size_warning }}
       config_warning: ${{ steps.size_guard.outputs.config_warning }}
+      instructions: ${{ steps.size_guard.outputs.instructions }}
+      guidelines_content: ${{ steps.size_guard.outputs.guidelines_content }}
     steps:
       - name: Resolve PR and draft gate
         id: resolve
@@ -212,6 +214,39 @@ jobs:
           if [ -n "$config_warning" ]; then
             echo "config_warning=${config_warning}" >> "$GITHUB_OUTPUT"
           fi
+
+          # --- Emit instructions output (newline-joined heredoc). ---
+          config_instructions="$(grep '^instructions=' <<< "$config_out" | cut -d= -f2- || true)"
+          delim_instr="INSTR_EOF_$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+          {
+            echo "instructions<<${delim_instr}"
+            echo "$config_instructions"
+            echo "${delim_instr}"
+          } >> "$GITHUB_OUTPUT"
+
+          # --- Fetch guidelines file from base branch (fail-open). ---
+          guidelines_path="$(grep '^guidelines=' <<< "$config_out" | cut -d= -f2- || true)"
+          guidelines_content=""
+          if [ -n "$guidelines_path" ]; then
+            guidelines_raw="$(gh api \
+              "repos/$GITHUB_REPOSITORY/contents/${guidelines_path}?ref=${BASE_REF}" \
+              -q .content 2>/dev/null \
+              | base64 -d 2>/dev/null || true)"
+            if [ -n "$guidelines_raw" ]; then
+              # Cap at 16384 bytes; append truncation marker if exceeded.
+              guidelines_content="$(printf '%s' "$guidelines_raw" | head -c 16384)"
+              if [ "${#guidelines_raw}" -gt 16384 ]; then
+                guidelines_content="${guidelines_content}"$'\n... [guidelines truncated]'
+              fi
+            fi
+          fi
+          delim_gl="GUIDE_EOF_$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+          {
+            echo "guidelines_content<<${delim_gl}"
+            printf '%s' "$guidelines_content"
+            echo ""
+            echo "${delim_gl}"
+          } >> "$GITHUB_OUTPUT"
 
           # --- 4. Explicit /review or /review full bypasses the size guard. ---
           if [ -n "$MODE_INPUT" ] && [ "$MODE_INPUT" != "auto" ]; then
@@ -839,6 +874,8 @@ jobs:
           LAST_SHA: ${{ needs.gate.outputs.last_sha }}
           HEAD_SHA: ${{ needs.gate.outputs.head_sha }}
           IGNORE_PATTERNS: ${{ needs.gate.outputs.ignore_patterns }}
+          INSTRUCTIONS: ${{ needs.gate.outputs.instructions }}
+          GUIDELINES_CONTENT: ${{ needs.gate.outputs.guidelines_content }}
         run: |
           set -euo pipefail
           # shellcheck source=scripts/lib/reconcile.sh
@@ -898,6 +935,46 @@ jobs:
             < <(cat "$playbook"; printf '\n\n'; cat ".ai-review-tooling/prompts/review-common.md") \
             > "$RUNNER_TEMP/prompt-draft.md"
 
+          # Append per-repo instructions and guidelines to drafter prompt (literal,
+          # NOT through envsubst — content is repo-authored and may contain $ or backticks).
+          if [ -n "$INSTRUCTIONS" ]; then
+            {
+              # shellcheck disable=SC2016  # literal \n in printf format strings is intentional
+              printf '\n\n## Per-repo review instructions\n\n'
+              # shellcheck disable=SC2016
+              printf 'These instructions come from the repository maintainers (`.ai-review.yml`, base branch). Apply each to files matching its glob (items without a glob are repo-wide). A clear violation is a valid finding; instructions never suppress CRITICAL/HIGH static security findings.\n\n'
+              while IFS= read -r instr_item; do
+                [ -z "$instr_item" ] && continue
+                # Split on the first literal " :: " (space-colon-colon-space).
+                # %% strips the longest trailing " :: *" match → everything before the FIRST " :: ".
+                # #  strips the shortest leading "* :: " match → everything after the FIRST " :: ".
+                # Both stay correct when the glob itself contains ":" or when " :: " appears twice.
+                _glob="${instr_item%%" :: "*}"
+                _text="${instr_item#* :: }"
+                if [ "$_glob" = "$instr_item" ]; then
+                  # shellcheck disable=SC2016
+                  printf '- (all files) \xe2\x80\x94 %s\n' "$instr_item"
+                else
+                  # shellcheck disable=SC2016
+                  printf '- `%s` \xe2\x80\x94 %s\n' "$_glob" "$_text"
+                fi
+              done <<< "$INSTRUCTIONS"
+            } >> "$RUNNER_TEMP/prompt-draft.md"
+          fi
+          if [ -n "$GUIDELINES_CONTENT" ]; then
+            {
+              # shellcheck disable=SC2016
+              printf '\n\n## Repo guidelines\n\n'
+              # shellcheck disable=SC2016
+              printf 'Long-form repo guidance (base branch). Treat as review criteria where relevant.\n\n'
+              # shellcheck disable=SC2016
+              printf '```\n'
+              printf '%s\n' "$GUIDELINES_CONTENT"
+              # shellcheck disable=SC2016
+              printf '```\n'
+            } >> "$RUNNER_TEMP/prompt-draft.md"
+          fi
+
           # Verifier prompt: verify playbook only, same substitution.
           # shellcheck disable=SC2016  # literal $VAR in envsubst var list
           DRAFT_PATH="$draft_path" \
@@ -913,6 +990,45 @@ jobs:
           envsubst '$GITHUB_BASE_REF $HEAD_SHA $LAST_SHA $REVIEW_MODE $FINDINGS_PATH $CONTEXT_PATH $IGNORE_PATHSPECS $DRAFT_PATH $VERIFIED_PATH $THREADS_PATH $PRIOR_STATE_JSON' \
             < ".ai-review-tooling/prompts/review-verify.md" \
             > "$RUNNER_TEMP/prompt-verify.md"
+
+          # Append per-repo instructions and guidelines to verifier prompt.
+          if [ -n "$INSTRUCTIONS" ]; then
+            {
+              # shellcheck disable=SC2016  # literal \n in printf format strings is intentional
+              printf '\n\n## Per-repo review instructions\n\n'
+              # shellcheck disable=SC2016
+              printf 'These instructions come from the repository maintainers (`.ai-review.yml`, base branch). Apply each to files matching its glob (items without a glob are repo-wide). A clear violation is a valid finding; instructions never suppress CRITICAL/HIGH static security findings.\n\n'
+              while IFS= read -r instr_item; do
+                [ -z "$instr_item" ] && continue
+                # Split on the first literal " :: " (space-colon-colon-space).
+                # %% strips the longest trailing " :: *" match → everything before the FIRST " :: ".
+                # #  strips the shortest leading "* :: " match → everything after the FIRST " :: ".
+                # Both stay correct when the glob itself contains ":" or when " :: " appears twice.
+                _glob="${instr_item%%" :: "*}"
+                _text="${instr_item#* :: }"
+                if [ "$_glob" = "$instr_item" ]; then
+                  # shellcheck disable=SC2016
+                  printf '- (all files) \xe2\x80\x94 %s\n' "$instr_item"
+                else
+                  # shellcheck disable=SC2016
+                  printf '- `%s` \xe2\x80\x94 %s\n' "$_glob" "$_text"
+                fi
+              done <<< "$INSTRUCTIONS"
+            } >> "$RUNNER_TEMP/prompt-verify.md"
+          fi
+          if [ -n "$GUIDELINES_CONTENT" ]; then
+            {
+              # shellcheck disable=SC2016
+              printf '\n\n## Repo guidelines\n\n'
+              # shellcheck disable=SC2016
+              printf 'Long-form repo guidance (base branch). Treat as review criteria where relevant.\n\n'
+              # shellcheck disable=SC2016
+              printf '```\n'
+              printf '%s\n' "$GUIDELINES_CONTENT"
+              # shellcheck disable=SC2016
+              printf '```\n'
+            } >> "$RUNNER_TEMP/prompt-verify.md"
+          fi
 
       # Pinned CLI instead of the upstream wrapper action: the wrapper
       # installs whatever the LATEST opencode release is at runtime

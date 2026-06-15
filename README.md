@@ -70,6 +70,22 @@ max_changed_files: 400    # optional; default 400
 max_diff_lines: 20000     # optional; default 20 000
 ```
 
+You can also provide per-path review instructions and a guidelines file:
+
+```yaml
+version: 1
+instructions:
+  - "api/** :: Flag handlers missing input validation."
+  - "Prefer explicit error wrapping."   # no glob -> applies to all files
+guidelines: docs/review-guidelines.md
+```
+
+**`instructions:`** — a list of review directives. Each item is either `"<glob> :: <text>"` (applies to files matching the glob) or a plain string (repo-wide). Text is truncated to 500 characters per item. Malformed items are skipped individually and do not invalidate the rest of the config.
+
+**`guidelines:`** — a relative path to a long-form review guidelines file in your repo. The file is fetched from the base branch and injected into the review prompt (capped at 16 KB). Unsafe paths (leading `/` or `..` segments) are silently ignored. On fetch failure the field is silently omitted — no hard fail.
+
+Both keys follow the same base-branch trust rule: they are read from the base branch only, never the PR head.
+
 **Where it lives**: the file is read from the **base branch** only, never from the PR head. This closes a threat: a PR author cannot write an `.ai-review.yml` that ignores their own sensitive changes. The config PR itself is reviewed with the old (or absent) config — same behavior as branch protection rules.
 
 **`ignore:` controls what the AI reviews, never what the scanners report.** Scanners (gitleaks, opengrep, osv-scanner) run on everything and their SARIF uploads are always complete. `ignore:` filters: the diff the LLM reads, the cross-file impact map sweep, and findings forwarded to the LLM. HIGH-severity findings from ignored paths are still forwarded, marked `ignoredPath: true`, and surfaced in the walkthrough body.

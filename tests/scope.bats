@@ -89,6 +89,155 @@ ignore:
   echo "$output" | grep -Fxq 'ignore=vendor/**'
 }
 
+@test "parse: instructions with glob delimiter emitted as-is" {
+  config="$(printf 'version: 1\ninstructions:\n  - "api/** :: Flag handlers missing input validation."\n  - "Prefer explicit error wrapping."\n')"
+  run scope_parse_config <<< "$config"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx 'valid=true'
+  echo "$output" | grep -Fxq 'instructions=api/** :: Flag handlers missing input validation.'
+  echo "$output" | grep -Fxq 'instructions=Prefer explicit error wrapping.'
+}
+
+@test "parse: instructions without delimiter -> repo-wide (still emitted)" {
+  config="$(printf 'version: 1\ninstructions:\n  - "Always check for nil before dereferencing."\n')"
+  run scope_parse_config <<< "$config"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -Fxq 'instructions=Always check for nil before dereferencing.'
+}
+
+@test "parse: instructions item truncated to 500 chars" {
+  # Build a 600-char string
+  long="$(printf '%0.s-' {1..600})"
+  config="$(printf 'version: 1\ninstructions:\n  - "%s"\n' "$long")"
+  run scope_parse_config <<< "$config"
+  [ "$status" -eq 0 ]
+  # The emitted instructions= value should be at most 500 chars
+  # wc -c counts the newline too, so expect <= 501
+  item_len="$(echo "$output" | grep '^instructions=' | sed 's/^instructions=//' | wc -c | tr -d ' ')"
+  [ "$item_len" -le 501 ]
+}
+
+@test "parse: malformed instruction item does NOT set valid=false" {
+  # An instruction that looks weird but is just a string — should not invalidate
+  config="$(printf 'version: 1\ninstructions:\n  - "::: bad ::: item"\n')"
+  run scope_parse_config <<< "$config"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx 'valid=true'
+  ! echo "$output" | grep -qx 'valid=false'
+}
+
+@test "parse: instructions interleaved with other keys" {
+  config="$(printf 'version: 1\nmax_changed_files: 200\ninstructions:\n  - "api/** :: validate inputs"\nignore:\n  - dist/**\n')"
+  run scope_parse_config <<< "$config"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx 'valid=true'
+  echo "$output" | grep -qx 'max_changed_files=200'
+  echo "$output" | grep -Fxq 'instructions=api/** :: validate inputs'
+  echo "$output" | grep -Fxq 'ignore=dist/**'
+}
+
+@test "parse: guidelines present and safe -> emitted" {
+  config="$(printf 'version: 1\nguidelines: docs/review-guidelines.md\n')"
+  run scope_parse_config <<< "$config"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx 'valid=true'
+  echo "$output" | grep -Fxq 'guidelines=docs/review-guidelines.md'
+}
+
+@test "parse: guidelines absent -> not emitted" {
+  config="$(printf 'version: 1\n')"
+  run scope_parse_config <<< "$config"
+  [ "$status" -eq 0 ]
+  ! echo "$output" | grep -q '^guidelines='
+}
+
+@test "parse: guidelines with leading slash -> skipped (not valid=false)" {
+  config="$(printf 'version: 1\nguidelines: /etc/passwd\n')"
+  run scope_parse_config <<< "$config"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx 'valid=true'
+  ! echo "$output" | grep -q '^guidelines='
+}
+
+@test "parse: guidelines with .. segment -> skipped (not valid=false)" {
+  config="$(printf 'version: 1\nguidelines: ../secrets/token\n')"
+  run scope_parse_config <<< "$config"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx 'valid=true'
+  ! echo "$output" | grep -q '^guidelines='
+}
+
+@test "parse: guidelines with embedded .. segment -> skipped" {
+  config="$(printf 'version: 1\nguidelines: docs/../../../etc/passwd\n')"
+  run scope_parse_config <<< "$config"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx 'valid=true'
+  ! echo "$output" | grep -q '^guidelines='
+}
+
+@test "parse: ignore regression via scope_parse_list helper — still works" {
+  config="$(printf 'version: 1\nignore:\n  - dist/**\n  - vendor/**\n  - "docs/generated/**"\n')"
+  run scope_parse_config <<< "$config"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx 'valid=true'
+  echo "$output" | grep -Fxq 'ignore=dist/**'
+  echo "$output" | grep -Fxq 'ignore=vendor/**'
+  echo "$output" | grep -Fxq 'ignore=docs/generated/**'
+}
+
+@test "parse: unknown key forward-compat — instructions/guidelines present alongside unknown key" {
+  config="$(printf 'version: 1\nunknown_future_key: somevalue\ninstructions:\n  - "api/** :: check auth"\nguidelines: docs/guide.md\n')"
+  run scope_parse_config <<< "$config"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx 'valid=true'
+  echo "$output" | grep -Fxq 'instructions=api/** :: check auth'
+  echo "$output" | grep -Fxq 'guidelines=docs/guide.md'
+}
+
+# ---------------------------------------------------------------------------
+# scope_parse_list (direct)
+# ---------------------------------------------------------------------------
+
+@test "parse_list: extracts items for a named key" {
+  config="$(printf 'version: 1\nignore:\n  - dist/**\n  - vendor/**\n')"
+  run scope_parse_list "ignore" <<< "$config"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -Fxq 'dist/**'
+  echo "$output" | grep -Fxq 'vendor/**'
+}
+
+@test "parse_list: stops at next top-level key" {
+  config="$(printf 'version: 1\nignore:\n  - dist/**\nmax_changed_files: 300\n')"
+  run scope_parse_list "ignore" <<< "$config"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -Fxq 'dist/**'
+  ! echo "$output" | grep -q 'max_changed_files'
+}
+
+@test "parse_list: blank line resets block (items after blank not included)" {
+  config="$(printf 'version: 1\nignore:\n  - dist/**\n\n  - vendor/**\n')"
+  run scope_parse_list "ignore" <<< "$config"
+  [ "$status" -eq 0 ]
+  # blank line resets in_block; vendor/** line appears as a stray list item
+  # that is no longer under the key — it should NOT be emitted
+  echo "$output" | grep -Fxq 'dist/**'
+  ! echo "$output" | grep -Fxq 'vendor/**'
+}
+
+@test "parse_list: strips double quotes" {
+  config="$(printf 'version: 1\nignore:\n  - "docs/generated/**"\n')"
+  run scope_parse_list "ignore" <<< "$config"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -Fxq 'docs/generated/**'
+}
+
+@test "parse_list: key absent -> empty output" {
+  config="$(printf 'version: 1\n')"
+  run scope_parse_list "instructions" <<< "$config"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
 # ---------------------------------------------------------------------------
 # scope_builtin_ignores
 # ---------------------------------------------------------------------------
@@ -348,4 +497,24 @@ ignore:
   [ "$status" -eq 0 ]
   echo "$output" | grep -qx 'max_files=400'
   echo "$output" | grep -qx 'max_lines=20000'
+}
+
+@test "parse: workflow consumption of instructions and guidelines under set -euo pipefail" {
+  SCOPE_SH="$REPO_ROOT/scripts/lib/scope.sh"
+  run bash -c "
+    set -euo pipefail
+    source \"$SCOPE_SH\"
+    config_out=\"\$(scope_parse_config <<< 'version: 1
+instructions:
+  - \"api/** :: check auth\"
+  - \"Be strict.\"
+guidelines: docs/guide.md')\"
+    instructions_count=\"\$(grep -c '^instructions=' <<< \"\$config_out\" || true)\"
+    guidelines=\"\$(grep '^guidelines=' <<< \"\$config_out\" | cut -d= -f2- || true)\"
+    echo \"instructions_count=\$instructions_count\"
+    echo \"guidelines=\$guidelines\"
+  "
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx 'instructions_count=2'
+  echo "$output" | grep -qx 'guidelines=docs/guide.md'
 }
