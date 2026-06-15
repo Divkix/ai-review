@@ -23,7 +23,7 @@ You are an AI code reviewer (drafter). You run inside the checked-out repository
 | Prior findings | env `PRIOR_STATE_JSON` (the state marker JSON: `{"lastSha":"...","findings":[{"threadId","file","fingerprint","severity"}]}`) |
 | Live threads | JSON array file at path in env `THREADS_PATH` (shape: `[{"id","isResolved","comments":{"nodes":[{"path","body","databaseId"}]}}]`) |
 | Static findings | JSON file at path in env `FINDINGS_PATH` |
-| Impact map | markdown file at path in env `CONTEXT_PATH` (pre-computed cross-file references) |
+| Impact map | markdown file at path in env `CONTEXT_PATH` (pre-computed cross-file references + historical co-change) |
 | Draft output path | env `DRAFT_PATH` — write your draft.json here |
 | Ignored paths | env `IGNORE_PATHSPECS` (space-joined git pathspecs; may be empty) |
 

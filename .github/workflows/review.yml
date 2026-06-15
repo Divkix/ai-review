@@ -715,6 +715,8 @@ jobs:
           . .ai-review-tooling/scripts/lib/scope.sh
           # shellcheck source=.ai-review-tooling/scripts/lib/context.sh
           . .ai-review-tooling/scripts/lib/context.sh
+          # shellcheck source=.ai-review-tooling/scripts/lib/cochange.sh
+          . .ai-review-tooling/scripts/lib/cochange.sh
           # Build patterns file: config patterns (from gate) + built-in patterns.
           patterns_file="$(mktemp /tmp/context-patterns.XXXXXX)"
           if [ -n "$IGNORE_PATTERNS" ]; then
@@ -728,10 +730,14 @@ jobs:
             range="origin/${BASE_REF}...HEAD"
           fi
           echo "Impact range: $range"
-          context_build_map "$range" "$patterns_file" > context.md
+          # Split byte budget: impact map 52 KB + co-change 8 KB = 60 KB total.
+          # This guarantees the co-change section is never truncated away by a huge
+          # impact map. fetch-depth: 0 is already set on this job (no change needed).
+          context_build_map "$range" "$patterns_file" > context-impact.md
+          cochange_build_map "$range" "origin/${BASE_REF}" "$patterns_file" > context-cochange.md
           rm -f "$patterns_file"
-          # Hard cap so a huge PR can't blow the prompt/token budget.
-          head -c 60000 context.md > context.trunc && mv context.trunc context.md
+          head -c 52000 context-impact.md > context.md
+          head -c 8000 context-cochange.md >> context.md
           wc -c context.md
 
       - name: Upload context artifact
