@@ -1287,31 +1287,12 @@ jobs:
             < <(cat "$playbook"; printf '\n\n'; cat ".ai-review-tooling/prompts/review-common.md") \
             > "$RUNNER_TEMP/prompt-draft.md"
 
-          # Append per-repo instructions and guidelines to drafter prompt (literal,
-          # NOT through envsubst — content is repo-authored and may contain $ or backticks).
+          # Append per-repo instructions to drafter prompt via scope_render_instructions
+          # (literal, NOT through envsubst — content is repo-authored and may contain
+          # $ or backticks). scope_render_instructions uses printf '%s\n' so a leading
+          # '-' in an instruction never trips bash's builtin printf option parsing.
           if [ -n "$INSTRUCTIONS" ]; then
-            {
-              # shellcheck disable=SC2016  # literal \n in printf format strings is intentional
-              printf '\n\n## Per-repo review instructions\n\n'
-              # shellcheck disable=SC2016
-              printf 'These instructions come from the repository maintainers (`.ai-review.yml`, base branch). Apply each to files matching its glob (items without a glob are repo-wide). A clear violation is a valid finding; instructions never suppress CRITICAL/HIGH static security findings.\n\n'
-              while IFS= read -r instr_item; do
-                [ -z "$instr_item" ] && continue
-                # Split on the first literal " :: " (space-colon-colon-space).
-                # %% strips the longest trailing " :: *" match → everything before the FIRST " :: ".
-                # #  strips the shortest leading "* :: " match → everything after the FIRST " :: ".
-                # Both stay correct when the glob itself contains ":" or when " :: " appears twice.
-                _glob="${instr_item%%" :: "*}"
-                _text="${instr_item#* :: }"
-                if [ "$_glob" = "$instr_item" ]; then
-                  # shellcheck disable=SC2016
-                  printf '- (all files) \xe2\x80\x94 %s\n' "$instr_item"
-                else
-                  # shellcheck disable=SC2016
-                  printf '- `%s` \xe2\x80\x94 %s\n' "$_glob" "$_text"
-                fi
-              done <<< "$INSTRUCTIONS"
-            } >> "$RUNNER_TEMP/prompt-draft.md"
+            printf '%s' "$INSTRUCTIONS" | scope_render_instructions >> "$RUNNER_TEMP/prompt-draft.md"
           fi
           if [ -n "$GUIDELINES_CONTENT" ]; then
             {
@@ -1343,30 +1324,9 @@ jobs:
             < ".ai-review-tooling/prompts/review-verify.md" \
             > "$RUNNER_TEMP/prompt-verify.md"
 
-          # Append per-repo instructions and guidelines to verifier prompt.
+          # Append per-repo instructions to verifier prompt via scope_render_instructions.
           if [ -n "$INSTRUCTIONS" ]; then
-            {
-              # shellcheck disable=SC2016  # literal \n in printf format strings is intentional
-              printf '\n\n## Per-repo review instructions\n\n'
-              # shellcheck disable=SC2016
-              printf 'These instructions come from the repository maintainers (`.ai-review.yml`, base branch). Apply each to files matching its glob (items without a glob are repo-wide). A clear violation is a valid finding; instructions never suppress CRITICAL/HIGH static security findings.\n\n'
-              while IFS= read -r instr_item; do
-                [ -z "$instr_item" ] && continue
-                # Split on the first literal " :: " (space-colon-colon-space).
-                # %% strips the longest trailing " :: *" match → everything before the FIRST " :: ".
-                # #  strips the shortest leading "* :: " match → everything after the FIRST " :: ".
-                # Both stay correct when the glob itself contains ":" or when " :: " appears twice.
-                _glob="${instr_item%%" :: "*}"
-                _text="${instr_item#* :: }"
-                if [ "$_glob" = "$instr_item" ]; then
-                  # shellcheck disable=SC2016
-                  printf '- (all files) \xe2\x80\x94 %s\n' "$instr_item"
-                else
-                  # shellcheck disable=SC2016
-                  printf '- `%s` \xe2\x80\x94 %s\n' "$_glob" "$_text"
-                fi
-              done <<< "$INSTRUCTIONS"
-            } >> "$RUNNER_TEMP/prompt-verify.md"
+            printf '%s' "$INSTRUCTIONS" | scope_render_instructions >> "$RUNNER_TEMP/prompt-verify.md"
           fi
           if [ -n "$GUIDELINES_CONTENT" ]; then
             {

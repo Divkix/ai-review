@@ -707,3 +707,115 @@ guidelines: docs/guide.md')\"
   count="$(echo "$output" | grep -c 'python' || true)"
   [ "$count" -eq 1 ]
 }
+
+# ---------------------------------------------------------------------------
+# scope_render_instructions
+# ---------------------------------------------------------------------------
+
+@test "render_instructions: single glob item renders correctly" {
+  SCOPE_SH="$REPO_ROOT/scripts/lib/scope.sh"
+  run bash -c "
+    set -euo pipefail
+    source \"$SCOPE_SH\"
+    scope_render_instructions <<< 'api/** :: Flag handlers missing input validation.'
+  "
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qF '## Per-repo review instructions'
+  echo "$output" | grep -qF -- '- `api/**` — Flag handlers missing input validation.'
+}
+
+@test "render_instructions: no-glob item renders as repo-wide" {
+  SCOPE_SH="$REPO_ROOT/scripts/lib/scope.sh"
+  run bash -c "
+    set -euo pipefail
+    source \"$SCOPE_SH\"
+    scope_render_instructions <<< 'Always check for nil before dereferencing.'
+  "
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qF -- '- (all files) — Always check for nil before dereferencing.'
+}
+
+@test "render_instructions: leading dash in text does NOT error (regression guard)" {
+  # This is the production bug: bash builtin printf '- ...' treats the leading
+  # dash as a flag and exits 2 under set -euo pipefail. The fix uses
+  # printf '%s\n' "$line" instead. This test MUST run under bash (not /usr/bin/printf).
+  SCOPE_SH="$REPO_ROOT/scripts/lib/scope.sh"
+  run bash -c "
+    set -euo pipefail
+    source \"$SCOPE_SH\"
+    scope_render_instructions <<< '- leading dash text'
+  "
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qF -- '- (all files) — - leading dash text'
+}
+
+@test "render_instructions: colon-in-glob splits on first :: only" {
+  SCOPE_SH="$REPO_ROOT/scripts/lib/scope.sh"
+  run bash -c "
+    set -euo pipefail
+    source \"$SCOPE_SH\"
+    scope_render_instructions <<< 'a:b/* :: check colon glob'
+  "
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qF -- '- `a:b/*` — check colon glob'
+}
+
+@test "render_instructions: two :: splits on FIRST only" {
+  SCOPE_SH="$REPO_ROOT/scripts/lib/scope.sh"
+  run bash -c "
+    set -euo pipefail
+    source \"$SCOPE_SH\"
+    scope_render_instructions <<< 'path/** :: text :: extra colon'
+  "
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qF -- '- `path/**` — text :: extra colon'
+}
+
+@test "render_instructions: empty stdin -> empty output" {
+  SCOPE_SH="$REPO_ROOT/scripts/lib/scope.sh"
+  run bash -c "
+    set -euo pipefail
+    source \"$SCOPE_SH\"
+    scope_render_instructions <<< ''
+  "
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "render_instructions: multiple items all rendered" {
+  SCOPE_SH="$REPO_ROOT/scripts/lib/scope.sh"
+  run bash -c "
+    set -euo pipefail
+    source \"$SCOPE_SH\"
+    printf '%s\n%s\n' 'api/** :: validate inputs' 'Be strict.' | scope_render_instructions
+  "
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qF -- '- `api/**` — validate inputs'
+  echo "$output" | grep -qF -- '- (all files) — Be strict.'
+  # Header emitted exactly once
+  count="$(echo "$output" | grep -c '## Per-repo review instructions' || true)"
+  [ "$count" -eq 1 ]
+}
+
+@test "render_instructions: blank lines in input are skipped" {
+  SCOPE_SH="$REPO_ROOT/scripts/lib/scope.sh"
+  run bash -c "
+    set -euo pipefail
+    source \"$SCOPE_SH\"
+    printf '%s\n%s\n%s\n' 'api/** :: first' '' 'second'  | scope_render_instructions
+  "
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qF -- '- `api/**` — first'
+  echo "$output" | grep -qF -- '- (all files) — second'
+}
+
+@test "render_instructions: lead sentence present in output" {
+  SCOPE_SH="$REPO_ROOT/scripts/lib/scope.sh"
+  run bash -c "
+    set -euo pipefail
+    source \"$SCOPE_SH\"
+    scope_render_instructions <<< 'api/** :: check auth'
+  "
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qF 'These instructions come from the repository maintainers'
+}
