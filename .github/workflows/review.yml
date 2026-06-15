@@ -874,6 +874,8 @@ jobs:
           LAST_SHA: ${{ needs.gate.outputs.last_sha }}
           HEAD_SHA: ${{ needs.gate.outputs.head_sha }}
           IGNORE_PATTERNS: ${{ needs.gate.outputs.ignore_patterns }}
+          INSTRUCTIONS: ${{ needs.gate.outputs.instructions }}
+          GUIDELINES_CONTENT: ${{ needs.gate.outputs.guidelines_content }}
         run: |
           set -euo pipefail
           # shellcheck source=scripts/lib/reconcile.sh
@@ -933,6 +935,42 @@ jobs:
             < <(cat "$playbook"; printf '\n\n'; cat ".ai-review-tooling/prompts/review-common.md") \
             > "$RUNNER_TEMP/prompt-draft.md"
 
+          # Append per-repo instructions and guidelines to drafter prompt (literal,
+          # NOT through envsubst — content is repo-authored and may contain $ or backticks).
+          if [ -n "$INSTRUCTIONS" ]; then
+            {
+              # shellcheck disable=SC2016  # literal \n in printf format strings is intentional
+              printf '\n\n## Per-repo review instructions\n\n'
+              # shellcheck disable=SC2016
+              printf 'These instructions come from the repository maintainers (`.ai-review.yml`, base branch). Apply each to files matching its glob (items without a glob are repo-wide). A clear violation is a valid finding; instructions never suppress CRITICAL/HIGH static security findings.\n\n'
+              while IFS= read -r instr_item; do
+                [ -z "$instr_item" ] && continue
+                if printf '%s' "$instr_item" | grep -qF ' :: '; then
+                  glob_part="$(printf '%s' "$instr_item" | sed 's/ :: .*//')"
+                  text_part="$(printf '%s' "$instr_item" | sed 's/^[^:]*:: //')"
+                  # shellcheck disable=SC2016
+                  printf '- `%s` \xe2\x80\x94 %s\n' "$glob_part" "$text_part"
+                else
+                  # shellcheck disable=SC2016
+                  printf '- (all files) \xe2\x80\x94 %s\n' "$instr_item"
+                fi
+              done <<< "$INSTRUCTIONS"
+            } >> "$RUNNER_TEMP/prompt-draft.md"
+          fi
+          if [ -n "$GUIDELINES_CONTENT" ]; then
+            {
+              # shellcheck disable=SC2016
+              printf '\n\n## Repo guidelines\n\n'
+              # shellcheck disable=SC2016
+              printf 'Long-form repo guidance (base branch). Treat as review criteria where relevant.\n\n'
+              # shellcheck disable=SC2016
+              printf '```\n'
+              printf '%s\n' "$GUIDELINES_CONTENT"
+              # shellcheck disable=SC2016
+              printf '```\n'
+            } >> "$RUNNER_TEMP/prompt-draft.md"
+          fi
+
           # Verifier prompt: verify playbook only, same substitution.
           # shellcheck disable=SC2016  # literal $VAR in envsubst var list
           DRAFT_PATH="$draft_path" \
@@ -948,6 +986,41 @@ jobs:
           envsubst '$GITHUB_BASE_REF $HEAD_SHA $LAST_SHA $REVIEW_MODE $FINDINGS_PATH $CONTEXT_PATH $IGNORE_PATHSPECS $DRAFT_PATH $VERIFIED_PATH $THREADS_PATH $PRIOR_STATE_JSON' \
             < ".ai-review-tooling/prompts/review-verify.md" \
             > "$RUNNER_TEMP/prompt-verify.md"
+
+          # Append per-repo instructions and guidelines to verifier prompt.
+          if [ -n "$INSTRUCTIONS" ]; then
+            {
+              # shellcheck disable=SC2016  # literal \n in printf format strings is intentional
+              printf '\n\n## Per-repo review instructions\n\n'
+              # shellcheck disable=SC2016
+              printf 'These instructions come from the repository maintainers (`.ai-review.yml`, base branch). Apply each to files matching its glob (items without a glob are repo-wide). A clear violation is a valid finding; instructions never suppress CRITICAL/HIGH static security findings.\n\n'
+              while IFS= read -r instr_item; do
+                [ -z "$instr_item" ] && continue
+                if printf '%s' "$instr_item" | grep -qF ' :: '; then
+                  glob_part="$(printf '%s' "$instr_item" | sed 's/ :: .*//')"
+                  text_part="$(printf '%s' "$instr_item" | sed 's/^[^:]*:: //')"
+                  # shellcheck disable=SC2016
+                  printf '- `%s` \xe2\x80\x94 %s\n' "$glob_part" "$text_part"
+                else
+                  # shellcheck disable=SC2016
+                  printf '- (all files) \xe2\x80\x94 %s\n' "$instr_item"
+                fi
+              done <<< "$INSTRUCTIONS"
+            } >> "$RUNNER_TEMP/prompt-verify.md"
+          fi
+          if [ -n "$GUIDELINES_CONTENT" ]; then
+            {
+              # shellcheck disable=SC2016
+              printf '\n\n## Repo guidelines\n\n'
+              # shellcheck disable=SC2016
+              printf 'Long-form repo guidance (base branch). Treat as review criteria where relevant.\n\n'
+              # shellcheck disable=SC2016
+              printf '```\n'
+              printf '%s\n' "$GUIDELINES_CONTENT"
+              # shellcheck disable=SC2016
+              printf '```\n'
+            } >> "$RUNNER_TEMP/prompt-verify.md"
+          fi
 
       # Pinned CLI instead of the upstream wrapper action: the wrapper
       # installs whatever the LATEST opencode release is at runtime
