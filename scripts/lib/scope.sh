@@ -374,6 +374,63 @@ scope_detect_stacks() {
   fi
 }
 
+# Render per-repo instructions list from stdin into a markdown section.
+#
+# stdin:  one "<glob> :: <text>" item per line (same format scope_parse_config
+#         emits and the gate passes via $INSTRUCTIONS). Items with no " :: " are
+#         repo-wide. Blank lines are skipped.
+# stdout: complete markdown section:
+#           ## Per-repo review instructions
+#           <lead sentence>
+#           <blank line>
+#           - `<glob>` — <text>    (glob items)
+#           - (all files) — <text> (repo-wide items)
+#
+# Every list line is built into a variable first and emitted with
+# `printf '%s\n' "$line"` so a leading `-` in the format string never
+# trips bash's builtin printf (which treats it as an option flag).
+#
+# Header and lead sentence are only emitted when ≥1 non-blank item is present.
+#
+# Usage: scope_render_instructions <<< "$INSTRUCTIONS"
+scope_render_instructions() {
+  local emdash
+  emdash=$'\xe2\x80\x94'   # UTF-8 em dash U+2014
+
+  local header_emitted=0
+  local instr_item _glob _text line
+
+  while IFS= read -r instr_item; do
+    [ -z "$instr_item" ] && continue
+
+    if [ "$header_emitted" = "0" ]; then
+      printf '%s\n' ''
+      printf '%s\n' ''
+      printf '%s\n' '## Per-repo review instructions'
+      printf '%s\n' ''
+      # shellcheck disable=SC2016  # backtick in single quotes is literal markdown, not expansion
+      printf '%s\n' 'These instructions come from the repository maintainers (`.ai-review.yml`, base branch). Apply each to files matching its glob (items without a glob are repo-wide). A clear violation is a valid finding; instructions never suppress CRITICAL/HIGH static security findings.'
+      printf '%s\n' ''
+      header_emitted=1
+    fi
+
+    # Split on the first literal " :: ".
+    # %% strips everything from the first " :: " onward → glob part.
+    # #  strips up to and including the first " :: " → text part.
+    _glob="${instr_item%%" :: "*}"
+    _text="${instr_item#*" :: "}"
+
+    if [ "$_glob" = "$instr_item" ]; then
+      # No " :: " present — repo-wide instruction.
+      line="- (all files) ${emdash} ${instr_item}"
+    else
+      line="- \`${_glob}\` ${emdash} ${_text}"
+    fi
+
+    printf '%s\n' "$line"
+  done
+}
+
 # Filter a findings.json array from stdin, applying ignore patterns.
 # Drops findings whose .file matches any pattern UNLESS .severity == "HIGH",
 # in which case the finding is kept and gains "ignoredPath": true.
