@@ -260,6 +260,120 @@ scope_exclude_pathspecs() {
   done < "$patterns_file"
 }
 
+# Detect technology stacks present in a GitHub PR files JSON array.
+# Reads a JSON array on stdin with shape: [{"filename":"..."}, ...]
+# Outputs detected stack tokens to stdout, one per line, sorted uniquely.
+#
+# Token mapping (contract):
+#   python  <- *.py, *.pyi
+#   go      <- *.go  (go.mod alone does NOT emit `go`)
+#   jsts    <- *.js, *.jsx, *.mjs, *.cjs, *.ts, *.tsx, *.mts, *.cts
+#   shell   <- *.sh, *.bash, *.bats, *.ksh, *.dash
+#   docker  <- Dockerfile, Dockerfile.*, *.dockerfile, Containerfile, Containerfile.*
+#   actions <- .github/workflows/*.yml, .github/workflows/*.yaml, action.yml, action.yaml
+#   iac     <- *.tf, *.tf.json, *.tfvars, docker-compose*.yml, docker-compose*.yaml,
+#              Chart.yaml, kustomization.yaml
+#
+# Disambiguation rules:
+#   .github/workflows/x.yml -> actions (NOT iac)
+#   go.mod alone -> empty output (NOT go)
+#
+# Uses jq to extract filenames, then pure bash case/glob for matching.
+#
+# Usage: scope_detect_stacks <<< "$pr_files_json"
+scope_detect_stacks() {
+  local tmpfile
+  tmpfile="$(mktemp /tmp/scope-stacks.XXXXXX)"
+  # Extract all filenames, one per line.
+  jq -r '.[].filename' > "$tmpfile"
+
+  local tokens=""
+  local fname base
+
+  while IFS= read -r fname; do
+    base="$(basename "$fname")"
+
+    # actions: .github/workflows/*.yml|yaml, action.yml, action.yaml
+    # Test actions BEFORE iac to avoid .github/workflows/*.yml matching iac.
+    case "$fname" in
+      .github/workflows/*.yml|.github/workflows/*.yaml)
+        tokens="${tokens}actions"$'\n'
+        continue
+        ;;
+    esac
+    case "$base" in
+      action.yml|action.yaml)
+        tokens="${tokens}actions"$'\n'
+        continue
+        ;;
+    esac
+
+    # python: *.py, *.pyi
+    case "$base" in
+      *.py|*.pyi)
+        tokens="${tokens}python"$'\n'
+        continue
+        ;;
+    esac
+
+    # go: *.go (go.mod does NOT qualify)
+    case "$base" in
+      *.go)
+        tokens="${tokens}go"$'\n'
+        continue
+        ;;
+    esac
+
+    # jsts: *.js, *.jsx, *.mjs, *.cjs, *.ts, *.tsx, *.mts, *.cts
+    case "$base" in
+      *.js|*.jsx|*.mjs|*.cjs|*.ts|*.tsx|*.mts|*.cts)
+        tokens="${tokens}jsts"$'\n'
+        continue
+        ;;
+    esac
+
+    # shell: *.sh, *.bash, *.bats, *.ksh, *.dash
+    case "$base" in
+      *.sh|*.bash|*.bats|*.ksh|*.dash)
+        tokens="${tokens}shell"$'\n'
+        continue
+        ;;
+    esac
+
+    # docker: Dockerfile, Dockerfile.*, *.dockerfile, Containerfile, Containerfile.*
+    case "$base" in
+      Dockerfile|Dockerfile.*|*.dockerfile|Containerfile|Containerfile.*)
+        tokens="${tokens}docker"$'\n'
+        continue
+        ;;
+    esac
+
+    # iac: *.tf, *.tf.json, *.tfvars, docker-compose*.yml, docker-compose*.yaml,
+    #      Chart.yaml, kustomization.yaml
+    # *.tf.json matched first (more specific) before *.tf would not match .tf.json anyway
+    case "$base" in
+      *.tf.json|*.tf|*.tfvars|Chart.yaml|kustomization.yaml)
+        tokens="${tokens}iac"$'\n'
+        continue
+        ;;
+    esac
+    # docker-compose*.yml and docker-compose*.yaml
+    case "$base" in
+      docker-compose*.yml|docker-compose*.yaml)
+        tokens="${tokens}iac"$'\n'
+        continue
+        ;;
+    esac
+
+  done < "$tmpfile"
+  rm -f "$tmpfile"
+
+  # Emit sorted unique tokens.
+  if [ -n "$tokens" ]; then
+    printf '%s' "$tokens" | sort -u
+  fi
+}
+
 # Filter a findings.json array from stdin, applying ignore patterns.
 # Drops findings whose .file matches any pattern UNLESS .severity == "HIGH",
 # in which case the finding is kept and gains "ignoredPath": true.

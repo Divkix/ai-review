@@ -2,14 +2,14 @@
 
 [![CI](https://github.com/Divkix/ai-review/actions/workflows/ci.yml/badge.svg)](https://github.com/Divkix/ai-review/actions/workflows/ci.yml)
 
-Self-hosted, CodeRabbit-style AI pull request reviewer that runs entirely in GitHub Actions. Static analysis — OpenGrep (AST/SAST), Gitleaks (secrets), and OSV-Scanner (dependency CVEs) — feeds an LLM reviewer (opencode agent, model-agnostic, bring your own key). Zero backend, zero per-run fees: the only costs are GitHub Actions minutes (free for public repos) and LLM tokens (DeepSeek V4 Pro by default; any [models.dev](https://models.dev) provider works).
+Self-hosted, CodeRabbit-style AI pull request reviewer that runs entirely in GitHub Actions. Static analysis (12 pinned scanners — see tool table below) feeds an LLM reviewer (opencode agent, model-agnostic, bring your own key). Zero backend, zero per-run fees: the only costs are GitHub Actions minutes (free for public repos) and LLM tokens (DeepSeek V4 Pro by default; any [models.dev](https://models.dev) provider works).
 
 ## How it works
 
 ```mermaid
 flowchart LR
     A[PR event] --> B[gate]
-    B --> C[static scan<br/>opengrep + gitleaks + osv]
+    B --> C[static scan<br/>12 pinned scanners]
     B --> H[context<br/>cross-file impact map]
     C --> D[llm-review<br/>drafter → skeptic → post]
     H --> D
@@ -17,6 +17,29 @@ flowchart LR
     F[comment commands] --> G[command router]
     G --> D
 ```
+
+## Static scanners (12 tools)
+
+| Tool | Version | Scope / stack gate | Output | Severity cap |
+|---|---|---|---|---|
+| [opengrep](https://github.com/opengrep/opengrep) | 1.22.0 | all files | SARIF | uncapped |
+| [gitleaks](https://github.com/gitleaks/gitleaks) | 8.30.1 | all files | SARIF | uncapped |
+| [osv-scanner](https://github.com/google/osv-scanner) | 2.3.8 | all files | SARIF | uncapped |
+| [ruff](https://github.com/astral-sh/ruff) | 0.15.17 | `python` stack (*.py, *.pyi) | SARIF | MEDIUM |
+| [golangci-lint](https://github.com/golangci/golangci-lint) | v2.12.2 | `go` stack (*.go + go.mod present) | SARIF | MEDIUM |
+| [oxlint](https://github.com/oxc-project/oxc) | 1.69.0 | `jsts` stack (*.js/ts/jsx/tsx/…) | SARIF | MEDIUM |
+| [shellcheck](https://github.com/koalaman/shellcheck) | v0.11.0 | `shell` stack (*.sh/bash/bats/…) | json1→findings | MEDIUM |
+| [hadolint](https://github.com/hadolint/hadolint) | v2.14.0 | `docker` stack (Dockerfile, Containerfile) | SARIF | MEDIUM |
+| [actionlint](https://github.com/rhysd/actionlint) | v1.7.12 | `actions` stack (.github/workflows/*.yml) | SARIF | MEDIUM |
+| [zizmor](https://github.com/zizmorcore/zizmor) | v1.25.2 | `actions` stack | SARIF | uncapped (security) |
+| [trivy](https://github.com/aquasecurity/trivy) | v0.71.0 | `iac` stack (*.tf, Helm, K8s manifests, docker-compose…) | SARIF | uncapped (security) |
+| [typos](https://github.com/crate-ci/typos) | v1.47.2 | all files (universal) | SARIF | LOW |
+
+**Stack detection**: the gate job detects which technology stacks appear in the PR's changed files and emits a `stacks` output (space-separated tokens: `python go jsts shell docker actions iac`). Each language-specific scanner runs only when its stack token is present, saving time on unrelated PRs.
+
+**Config isolation (D5)**: scanners ignore tool config files in the PR head — `ruff --isolated`, `shellcheck --norc`, `golangci-lint --no-config`, `hadolint -c .ai-review-tooling/rules/hadolint.yaml` (vendored neutral config; v2.14.0 has no `--no-config` flag), `oxlint -c $RUNNER_TEMP/oxlint-empty.json` (empty JSON generated at runtime outside the PR tree), `zizmor --no-config`. actionlint's `.github/actionlint.yaml` (runner labels only) is an accepted exception.
+
+**Decided alternates** (not in default roster): kube-linter (K8s best-practice checks; mostly subsumed by trivy's kubernetes scanner — add if callers are K8s-heavy and want probe/resource-limit findings), rumdl (markdown linter; findings are stylistic, lower review-signal — add once the tool stabilizes past 0.2.x), tflint (terraform lint-style checks; terraform slot covered by trivy's security checks — add if callers want deprecated-syntax/unused-declaration findings too).
 
 - **Auto full review** when a PR is opened, with one sticky status comment (mode, commit links, trigger, verdict) updated in place — never one comment per push.
 - **Incremental review** on each push: reviews only the new commits, then a deterministic `finalize` job resolves fixed review threads via GraphQL and dismisses the bot's stale REQUEST_CHANGES review.
@@ -111,7 +134,7 @@ Both keys follow the same base-branch trust rule: they are read from the base br
 
 - Commands are gated by `author_association` (OWNER/MEMBER/COLLABORATOR) and bot comments are rejected.
 - Untrusted content (comment bodies, issue titles/bodies, state JSON) is passed via `env:` only — never interpolated into `run:` scripts.
-- All third-party actions are pinned to commit SHAs; every fetched tool binary (opencode, opengrep, gitleaks, osv-scanner, ripgrep) is pinned by version + sha256, and the OpenGrep community ruleset is pinned to a commit (no install-latest-at-runtime).
+- All third-party actions are pinned to commit SHAs; every fetched tool binary (opencode, opengrep, gitleaks, osv-scanner, ripgrep, ruff, golangci-lint, oxlint, shellcheck, hadolint, actionlint, zizmor, trivy, typos) is pinned by version + sha256, and the OpenGrep community ruleset is pinned to a commit (no install-latest-at-runtime). See `docs/design/pinned-binary-unpinned-data.md` for how scanners that need runtime data (osv advisory DB, trivy misconfig rules, golangci module graph) are handled without breaking the pin invariant.
 - Privilege separation: the LLM drafter and skeptic steps run without a GitHub token (they write findings to local files only); the deterministic posting step within `llm-review` and the `finalize` job are the only steps that hold `github.token` and call the GitHub API — no LLM runs in those steps.
 - Scanners never fail the build; findings flow to the LLM as data.
 - Fork PRs receive no secrets (GitHub default), so the caller template skips them via a `head.repo == repository` condition (`LLM_API_KEY` would be empty); a collaborator can trigger `/review` on the PR instead.
@@ -141,7 +164,7 @@ There are no live PRs in CI — `.github/workflows/ci.yml` runs four static jobs
 | Job | What it guards | Run locally |
 |---|---|---|
 | **lint** | `actionlint` (+ bundled `shellcheck`) on both workflows | `actionlint .github/workflows/*.yml` |
-| **pins** | `OPENCODE_VERSION`/`OPENCODE_SHA256` in sync across all copies; each scanner binary (`OPENGREP`, `GITLEAKS`, `OSV_SCANNER`, `RIPGREP`) has a single `VERSION` + `SHA256` matching the real release asset; `OPENGREP_RULES_REF` is a 40-char commit; all `vN` pins share one major | `scripts/check-pins.sh` (offline: `CHECK_PINS_OFFLINE=1`) |
+| **pins** | `OPENCODE_VERSION`/`OPENCODE_SHA256` in sync across all copies; each scanner binary (`OPENGREP`, `GITLEAKS`, `OSV_SCANNER`, `RIPGREP`, and 9 new tools) has a single `VERSION` + `SHA256` matching the real release asset; `OPENGREP_RULES_REF` is a 40-char commit; all `vN` pins share one major | `scripts/check-pins.sh` (offline: `CHECK_PINS_OFFLINE=1`) |
 | **contract** | every `$VAR` the prompts read is set in a workflow `env:`; caller templates grant a permission superset; the gate's state-marker regex matches `reconcile.sh` | `python3 scripts/check-contract.py` |
 | **unit** | the pure lib scripts the workflows source (`scripts/lib/*.sh`) — baseline fallback, state parsing, SARIF merge, cross-file impact map | `bats tests/` |
 

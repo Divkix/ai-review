@@ -108,6 +108,7 @@ jobs:
       config_warning: ${{ steps.size_guard.outputs.config_warning }}
       instructions: ${{ steps.size_guard.outputs.instructions }}
       guidelines_content: ${{ steps.size_guard.outputs.guidelines_content }}
+      stacks: ${{ steps.size_guard.outputs.stacks }}
     steps:
       - name: Resolve PR and draft gate
         id: resolve
@@ -248,11 +249,23 @@ jobs:
             echo "${delim_gl}"
           } >> "$GITHUB_OUTPUT"
 
-          # --- 4. Explicit /review or /review full bypasses the size guard. ---
+          # --- 4. Detect stacks (fetch PR files JSON once; reused below). ---
+          pr_files_json="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR/files" --paginate \
+            | jq -s 'add // []')"
+          stacks="$(scope_detect_stacks <<< "$pr_files_json" | tr '\n' ' ' | sed 's/ *$//')"
+          delim_st="STACKS_EOF_$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+          {
+            echo "stacks<<${delim_st}"
+            echo "$stacks"
+            echo "${delim_st}"
+          } >> "$GITHUB_OUTPUT"
+          echo "detected stacks: ${stacks:-<none>}"
+
+          # --- 5. Explicit /review or /review full bypasses the size guard. ---
           if [ -n "$MODE_INPUT" ] && [ "$MODE_INPUT" != "auto" ]; then
             # Still compute filtered counts to log them; bypass the guard.
-            counts="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR/files" --paginate \
-              | jq -s 'add // []' \
+            # Reuse $pr_files_json already fetched above (avoids a duplicate API call).
+            counts="$(jq -s 'add // []' <<< "$pr_files_json" \
               | scope_filtered_counts "$patterns_file")"
             filtered_files="$(grep '^files=' <<< "$counts" | cut -d= -f2-)"
             filtered_lines="$(grep '^lines=' <<< "$counts" | cut -d= -f2-)"
@@ -266,9 +279,9 @@ jobs:
             exit 0
           fi
 
-          # --- 5. Auto mode: apply the guard. ---
-          counts="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR/files" --paginate \
-            | jq -s 'add // []' \
+          # --- 6. Auto mode: apply the guard. ---
+          # Reuse $pr_files_json already fetched above (avoids a duplicate API call).
+          counts="$(jq -s 'add // []' <<< "$pr_files_json" \
             | scope_filtered_counts "$patterns_file")"
           filtered_files="$(grep '^files=' <<< "$counts" | cut -d= -f2-)"
           filtered_lines="$(grep '^lines=' <<< "$counts" | cut -d= -f2-)"
@@ -619,6 +632,308 @@ jobs:
           sarif_file: osv.sarif
           category: ai-review-osv
 
+      # shellcheck is installed BEFORE actionlint so actionlint auto-discovers it
+      # on PATH and produces richer findings on run: blocks (D5 ordering note).
+      - name: Install shellcheck v0.11.0
+        run: |
+          set -euo pipefail
+          SHELLCHECK_VERSION="v0.11.0"
+          SHELLCHECK_SHA256="8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198"
+          curl -fsSL -o /tmp/shellcheck.tar.xz \
+            "https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+          echo "${SHELLCHECK_SHA256}  /tmp/shellcheck.tar.xz" | sha256sum -c -
+          tar -xJf /tmp/shellcheck.tar.xz -C /tmp "shellcheck-${SHELLCHECK_VERSION}/shellcheck"
+          sudo mv "/tmp/shellcheck-${SHELLCHECK_VERSION}/shellcheck" /usr/local/bin/shellcheck
+          shellcheck --version
+
+      - name: Run shellcheck
+        if: contains(needs.gate.outputs.stacks, 'shell')
+        run: |
+          set -euo pipefail
+          # Collect all shell files in the repo (not just diff — shellcheck runs on whole files).
+          mapfile -t shell_files < <(find . \
+            -not -path './.ai-review-tooling/*' \
+            \( -name '*.sh' -o -name '*.bash' -o -name '*.bats' -o -name '*.ksh' -o -name '*.dash' \) \
+            2>/dev/null || true)
+          if [ "${#shell_files[@]}" -eq 0 ]; then
+            echo "no shell files found — skipping"
+            exit 0
+          fi
+          # --norc: do not read .shellcheckrc from the PR head (config isolation, D5).
+          # --format=json1: structured output consumed by findings_from_shellcheck in sarif.sh.
+          # Exits non-zero on findings — guard with || true.
+          shellcheck --norc --format=json1 "${shell_files[@]}" > shellcheck.json || true
+
+      - name: Install ruff 0.15.17
+        run: |
+          set -euo pipefail
+          RUFF_VERSION="0.15.17"
+          RUFF_SHA256="7bca4641db4b0256d20f3a8c38057725e0982965639f5f9a0fb2f9aece4b7c4f"
+          curl -fsSL -o /tmp/ruff.tar.gz \
+            "https://github.com/astral-sh/ruff/releases/download/${RUFF_VERSION}/ruff-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${RUFF_SHA256}  /tmp/ruff.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/ruff.tar.gz -C /tmp "ruff-x86_64-unknown-linux-gnu/ruff"
+          sudo mv /tmp/ruff-x86_64-unknown-linux-gnu/ruff /usr/local/bin/ruff
+          ruff --version
+
+      - name: Run ruff
+        if: contains(needs.gate.outputs.stacks, 'python')
+        run: |
+          set -euo pipefail
+          # --isolated prevents reading any ruff.toml/pyproject.toml from the PR head (D5).
+          # Exits 1 on findings — guard with || true.
+          ruff check --isolated --output-format sarif . > ruff.sarif || true
+
+      - name: Upload ruff SARIF
+        if: ${{ !cancelled() && hashFiles('ruff.sarif') != '' }}
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
+        with:
+          sarif_file: ruff.sarif
+          category: ai-review-ruff
+
+      - name: Install golangci-lint v2.12.2
+        run: |
+          set -euo pipefail
+          GOLANGCI_VERSION="2.12.2"
+          GOLANGCI_SHA256="8df580d2670fed8fa984aac0507099af8df275e665215f5c7a2ae3943893a553"
+          curl -fsSL -o /tmp/golangci.tar.gz \
+            "https://github.com/golangci/golangci-lint/releases/download/v${GOLANGCI_VERSION}/golangci-lint-${GOLANGCI_VERSION}-linux-amd64.tar.gz"
+          echo "${GOLANGCI_SHA256}  /tmp/golangci.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/golangci.tar.gz -C /tmp "golangci-lint-${GOLANGCI_VERSION}-linux-amd64/golangci-lint"
+          sudo mv "/tmp/golangci-lint-${GOLANGCI_VERSION}-linux-amd64/golangci-lint" /usr/local/bin/golangci-lint
+          golangci-lint --version
+
+      - name: Run golangci-lint
+        if: contains(needs.gate.outputs.stacks, 'go')
+        env:
+          CGO_ENABLED: "0"
+          GOTOOLCHAIN: local
+        run: |
+          set -euo pipefail
+          # Shell guard: require go.mod at repo root (the tool needs a buildable module).
+          [ -f go.mod ] || exit 0
+          # --no-config: do not read .golangci.yml from PR head (D5).
+          # --output.sarif.path: write SARIF to a file (NOT stdout — text reporter also writes there).
+          # || true: exit 1 on findings must not fail the job.
+          golangci-lint run --no-config --output.sarif.path=golangci.sarif ./... || true
+
+      - name: Upload golangci-lint SARIF
+        if: ${{ !cancelled() && hashFiles('golangci.sarif') != '' }}
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
+        with:
+          sarif_file: golangci.sarif
+          category: ai-review-golangci-lint
+
+      - name: Install oxlint apps_v1.69.0
+        run: |
+          set -euo pipefail
+          OXLINT_VERSION="apps_v1.69.0"
+          OXLINT_SHA256="38351b7054948099663576fadcbe1ce5a27ccf7ff731700541dacca1df214dd1"
+          curl -fsSL -o /tmp/oxlint.tar.gz \
+            "https://github.com/oxc-project/oxc/releases/download/${OXLINT_VERSION}/oxlint-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${OXLINT_SHA256}  /tmp/oxlint.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/oxlint.tar.gz -C /tmp oxlint-x86_64-unknown-linux-gnu
+          sudo mv /tmp/oxlint-x86_64-unknown-linux-gnu /usr/local/bin/oxlint
+          oxlint --version
+
+      - name: Run oxlint
+        if: contains(needs.gate.outputs.stacks, 'jsts')
+        run: |
+          set -euo pipefail
+          # -c "$RUNNER_TEMP/oxlint-empty.json": pass an empty JSON config generated outside the
+          #   PR tree — prevents oxlint from auto-discovering .oxlintrc.json from the PR head,
+          #   which an attacker could use to silence its own findings (config isolation, D5).
+          #   Note: --disable-nested-config alone does NOT defeat a root-level config file.
+          # --format=sarif: emit SARIF to stdout (exits 0 even with findings).
+          printf '{}' > "$RUNNER_TEMP/oxlint-empty.json"
+          oxlint -c "$RUNNER_TEMP/oxlint-empty.json" --format=sarif . > oxlint.sarif
+
+      - name: Upload oxlint SARIF
+        if: ${{ !cancelled() && hashFiles('oxlint.sarif') != '' }}
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
+        with:
+          sarif_file: oxlint.sarif
+          category: ai-review-oxlint
+
+      - name: Install hadolint v2.14.0
+        run: |
+          set -euo pipefail
+          HADOLINT_VERSION="v2.14.0"
+          HADOLINT_SHA256="6bf226944684f56c84dd014e8b979d27425c0148f61b3bd99bcc6f39e9dc5a47"
+          curl -fsSL -o /tmp/hadolint \
+            "https://github.com/hadolint/hadolint/releases/download/${HADOLINT_VERSION}/hadolint-linux-x86_64"
+          echo "${HADOLINT_SHA256}  /tmp/hadolint" | sha256sum -c -
+          chmod +x /tmp/hadolint
+          sudo mv /tmp/hadolint /usr/local/bin/hadolint
+          hadolint --version
+
+      - name: Run hadolint
+        if: contains(needs.gate.outputs.stacks, 'docker')
+        run: |
+          set -euo pipefail
+          mapfile -t docker_files < <(find . \
+            -not -path './.ai-review-tooling/*' \
+            \( -name 'Dockerfile' -o -name 'Dockerfile.*' -o -name '*.dockerfile' \
+               -o -name 'Containerfile' -o -name 'Containerfile.*' \) \
+            2>/dev/null || true)
+          if [ "${#docker_files[@]}" -eq 0 ]; then
+            echo "no Dockerfile-like files found — skipping"
+            exit 0
+          fi
+          # --no-fail: findings do not exit non-zero (belt-and-braces; || true is the outer guard).
+          # -c .ai-review-tooling/rules/hadolint.yaml: vendored neutral config — prevents hadolint
+          #   from reading a .hadolint.yaml committed in the PR head (config isolation, D5).
+          #   Note: hadolint v2.14.0 has no --no-config flag; the vendored config is the correct approach.
+          # --format sarif: native SARIF output.
+          hadolint --no-fail -c .ai-review-tooling/rules/hadolint.yaml --format sarif "${docker_files[@]}" > hadolint.sarif || true
+
+      - name: Upload hadolint SARIF
+        if: ${{ !cancelled() && hashFiles('hadolint.sarif') != '' }}
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
+        with:
+          sarif_file: hadolint.sarif
+          category: ai-review-hadolint
+
+      # actionlint is installed AFTER shellcheck so shellcheck is already on PATH,
+      # giving actionlint richer findings on run: blocks (D5 ordering note).
+      - name: Install actionlint v1.7.12
+        run: |
+          set -euo pipefail
+          ACTIONLINT_VERSION="1.7.12"
+          ACTIONLINT_SHA256="8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
+          curl -fsSL -o /tmp/actionlint.tar.gz \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          echo "${ACTIONLINT_SHA256}  /tmp/actionlint.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/actionlint.tar.gz -C /tmp actionlint
+          sudo mv /tmp/actionlint /usr/local/bin/actionlint
+          actionlint --version
+
+      - name: Run actionlint
+        if: contains(needs.gate.outputs.stacks, 'actions')
+        run: |
+          set -euo pipefail
+          # Load the vendored SARIF template (pinned at v1.7.12, never fetched at runtime).
+          tmpl=".ai-review-tooling/rules/actionlint-sarif.tmpl"
+          if [ ! -f "$tmpl" ]; then
+            echo "actionlint SARIF template missing at $tmpl — skipping"
+            exit 0
+          fi
+          # actionlint auto-discovers .github/workflows/ from the repo root.
+          # The shellcheck binary installed earlier is already on PATH for richer run: findings.
+          # Exits non-zero on findings — guard with || true.
+          # shellcheck disable=SC2046
+          actionlint -format "$(cat "$tmpl")" > actionlint.sarif || true
+
+      - name: Upload actionlint SARIF
+        if: ${{ !cancelled() && hashFiles('actionlint.sarif') != '' }}
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
+        with:
+          sarif_file: actionlint.sarif
+          category: ai-review-actionlint
+
+      - name: Install zizmor v1.25.2
+        run: |
+          set -euo pipefail
+          ZIZMOR_VERSION="v1.25.2"
+          ZIZMOR_SHA256="aa1facd105f0d83fe5c55b1adcd9d7417de5d83aa27471f91dc0b66cf3803577"
+          curl -fsSL -o /tmp/zizmor.tar.gz \
+            "https://github.com/zizmorcore/zizmor/releases/download/${ZIZMOR_VERSION}/zizmor-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${ZIZMOR_SHA256}  /tmp/zizmor.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/zizmor.tar.gz -C /tmp zizmor
+          sudo mv /tmp/zizmor /usr/local/bin/zizmor
+          zizmor --version
+
+      - name: Run zizmor
+        if: contains(needs.gate.outputs.stacks, 'actions')
+        run: |
+          set -euo pipefail
+          # --format=sarif: native SARIF output.
+          # --no-online-audits: fully hermetic (no network, no token consumed).
+          # --no-exit-codes: exit 0 always (findings have severity-coded exit codes 10-14).
+          # --no-config: prevents auto-discovery of zizmor.yml from the PR head — a committed
+          #   config could suppress HIGH/error findings via rules.<id>.ignore (config isolation, D5).
+          #   Note: zizmor v1.25.2 has --no-config; this was verified to restore suppressed findings.
+          zizmor --format=sarif --no-online-audits --no-exit-codes --no-config .github/ > zizmor.sarif
+
+      - name: Upload zizmor SARIF
+        if: ${{ !cancelled() && hashFiles('zizmor.sarif') != '' }}
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
+        with:
+          sarif_file: zizmor.sarif
+          category: ai-review-zizmor
+
+      - name: Install trivy v0.71.0
+        run: |
+          set -euo pipefail
+          TRIVY_VERSION="0.71.0"
+          TRIVY_SHA256="30a3d22b23f88c233f1658f562fb477cae3b3e8b4761109d515b7698daf85814"
+          curl -fsSL -o /tmp/trivy.tar.gz \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          echo "${TRIVY_SHA256}  /tmp/trivy.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/trivy.tar.gz -C /tmp trivy
+          sudo mv /tmp/trivy /usr/local/bin/trivy
+          trivy --version
+
+      - name: Run trivy
+        if: contains(needs.gate.outputs.stacks, 'iac')
+        run: |
+          set -euo pipefail
+          # config subcommand: misconfig-only (no vuln/secret scan — no overlap with osv/gitleaks).
+          # --skip-check-update: use the binary-embedded checks bundle (pins the check set to the binary sha256, D23).
+          # --misconfig-scanners: all IaC scanners except dockerfile (hadolint handles Dockerfiles).
+          # --severity: filter to MEDIUM+ only; LOW trivy misconfig findings are noisy.
+          # --format sarif: native SARIF output.
+          # Exits non-zero on findings — guard with || true.
+          trivy config \
+            --format sarif \
+            --skip-check-update \
+            --severity MEDIUM,HIGH,CRITICAL \
+            --misconfig-scanners azure-arm,cloudformation,helm,kubernetes,terraform,terraformplan-json,terraformplan-snapshot,ansible \
+            -o trivy.sarif \
+            . || true
+
+      - name: Upload trivy SARIF
+        if: ${{ !cancelled() && hashFiles('trivy.sarif') != '' }}
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
+        with:
+          sarif_file: trivy.sarif
+          category: ai-review-trivy
+
+      - name: Install typos v1.47.2
+        run: |
+          set -euo pipefail
+          TYPOS_VERSION="v1.47.2"
+          TYPOS_SHA256="7aef58932fc123b4cf4b40d86468e89a3297d80169051d7cfd13a235e05fc426"
+          curl -fsSL -o /tmp/typos.tar.gz \
+            "https://github.com/crate-ci/typos/releases/download/${TYPOS_VERSION}/typos-${TYPOS_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          echo "${TYPOS_SHA256}  /tmp/typos.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/typos.tar.gz -C /tmp ./typos
+          sudo mv /tmp/typos /usr/local/bin/typos
+          typos --version
+
+      - name: Run typos
+        run: |
+          set -euo pipefail
+          # No stack gate — typos is universal (catches typos in any text file).
+          # --format sarif: native SARIF output.
+          # Exits non-zero when typos are found — guard with || true.
+          typos --format sarif . > typos.sarif || true
+
+      - name: Upload typos SARIF
+        if: ${{ !cancelled() && hashFiles('typos.sarif') != '' }}
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
+        with:
+          sarif_file: typos.sarif
+          category: ai-review-typos
+
       - name: Merge SARIF into findings.json
         env:
           IGNORE_PATTERNS: ${{ needs.gate.outputs.ignore_patterns }}
@@ -628,7 +943,26 @@ jobs:
           . .ai-review-tooling/scripts/lib/sarif.sh
           # shellcheck source=.ai-review-tooling/scripts/lib/scope.sh
           . .ai-review-tooling/scripts/lib/scope.sh
-          sarif_merge opengrep:opengrep.sarif gitleaks:gitleaks.sarif osv:osv.sarif > findings.json
+
+          # Compose all 12 tools. Missing files (skipped tools) contribute [].
+          # Security tools: uncapped (opengrep, gitleaks, osv, zizmor, trivy).
+          # Lint tools: capped MEDIUM (ruff, golangci-lint, oxlint, shellcheck via shim, hadolint, actionlint).
+          # Typos: capped LOW.
+          {
+            sarif_merge_one opengrep      opengrep.sarif
+            sarif_merge_one gitleaks      gitleaks.sarif
+            sarif_merge_one osv           osv.sarif
+            sarif_merge_one ruff          ruff.sarif         MEDIUM
+            sarif_merge_one golangci-lint golangci.sarif     MEDIUM
+            sarif_merge_one oxlint        oxlint.sarif       MEDIUM
+            findings_from_shellcheck      shellcheck.json    MEDIUM
+            sarif_merge_one hadolint      hadolint.sarif     MEDIUM
+            sarif_merge_one actionlint    actionlint.sarif   MEDIUM
+            sarif_merge_one zizmor        zizmor.sarif
+            sarif_merge_one trivy         trivy.sarif
+            sarif_merge_one typos         typos.sarif        LOW
+          } | jq -s 'add // []' > findings.json
+
           before="$(jq length findings.json)"
           echo "findings before filter: $before"
           # Filter findings forwarded to the LLM using CONFIG patterns only

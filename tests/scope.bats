@@ -518,3 +518,192 @@ guidelines: docs/guide.md')\"
   echo "$output" | grep -qx 'instructions_count=2'
   echo "$output" | grep -qx 'guidelines=docs/guide.md'
 }
+
+# ---------------------------------------------------------------------------
+# scope_detect_stacks
+# ---------------------------------------------------------------------------
+
+@test "detect_stacks: python file -> python token" {
+  run scope_detect_stacks <<< '[{"filename":"src/app.py"}]'
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx 'python'
+}
+
+@test "detect_stacks: .pyi file -> python token" {
+  run scope_detect_stacks <<< '[{"filename":"types/schema.pyi"}]'
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx 'python'
+}
+
+@test "detect_stacks: .go file -> go token" {
+  run scope_detect_stacks <<< '[{"filename":"cmd/main.go"}]'
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx 'go'
+}
+
+@test "detect_stacks: go.mod alone -> empty output (NOT go)" {
+  run scope_detect_stacks <<< '[{"filename":"go.mod"}]'
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "detect_stacks: .ts file -> jsts token" {
+  run scope_detect_stacks <<< '[{"filename":"src/index.ts"}]'
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx 'jsts'
+}
+
+@test "detect_stacks: .tsx file -> jsts token" {
+  run scope_detect_stacks <<< '[{"filename":"components/Button.tsx"}]'
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx 'jsts'
+}
+
+@test "detect_stacks: .mjs file -> jsts token" {
+  run scope_detect_stacks <<< '[{"filename":"lib/util.mjs"}]'
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx 'jsts'
+}
+
+@test "detect_stacks: .sh file -> shell token" {
+  run scope_detect_stacks <<< '[{"filename":"scripts/deploy.sh"}]'
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx 'shell'
+}
+
+@test "detect_stacks: .bats file -> shell token" {
+  run scope_detect_stacks <<< '[{"filename":"tests/scope.bats"}]'
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx 'shell'
+}
+
+@test "detect_stacks: Dockerfile -> docker token" {
+  run scope_detect_stacks <<< '[{"filename":"Dockerfile"}]'
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx 'docker'
+}
+
+@test "detect_stacks: Dockerfile.prod -> docker token" {
+  run scope_detect_stacks <<< '[{"filename":"Dockerfile.prod"}]'
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx 'docker'
+}
+
+@test "detect_stacks: .dockerfile extension -> docker token" {
+  run scope_detect_stacks <<< '[{"filename":"build/app.dockerfile"}]'
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx 'docker'
+}
+
+@test "detect_stacks: Containerfile -> docker token" {
+  run scope_detect_stacks <<< '[{"filename":"Containerfile"}]'
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx 'docker'
+}
+
+@test "detect_stacks: .github/workflows/x.yml -> actions (NOT iac)" {
+  run scope_detect_stacks <<< '[{"filename":".github/workflows/ci.yml"}]'
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx 'actions'
+  ! echo "$output" | grep -qx 'iac'
+}
+
+@test "detect_stacks: action.yml -> actions token" {
+  run scope_detect_stacks <<< '[{"filename":"action.yml"}]'
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx 'actions'
+}
+
+@test "detect_stacks: action.yaml -> actions token" {
+  run scope_detect_stacks <<< '[{"filename":"action.yaml"}]'
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx 'actions'
+}
+
+@test "detect_stacks: .tf file -> iac token" {
+  run scope_detect_stacks <<< '[{"filename":"infra/main.tf"}]'
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx 'iac'
+}
+
+@test "detect_stacks: .tfvars file -> iac token" {
+  run scope_detect_stacks <<< '[{"filename":"prod.tfvars"}]'
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx 'iac'
+}
+
+@test "detect_stacks: .tf.json file -> iac token" {
+  run scope_detect_stacks <<< '[{"filename":"generated.tf.json"}]'
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx 'iac'
+}
+
+@test "detect_stacks: Chart.yaml -> iac token" {
+  run scope_detect_stacks <<< '[{"filename":"helm/Chart.yaml"}]'
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx 'iac'
+}
+
+@test "detect_stacks: kustomization.yaml -> iac token" {
+  run scope_detect_stacks <<< '[{"filename":"overlays/kustomization.yaml"}]'
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx 'iac'
+}
+
+@test "detect_stacks: docker-compose.yml -> iac token" {
+  run scope_detect_stacks <<< '[{"filename":"docker-compose.yml"}]'
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx 'iac'
+}
+
+@test "detect_stacks: docker-compose.override.yaml -> iac token" {
+  run scope_detect_stacks <<< '[{"filename":"docker-compose.override.yaml"}]'
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx 'iac'
+}
+
+@test "detect_stacks: multiple stacks in one PR -> all tokens sorted" {
+  json='[
+    {"filename":"src/main.go"},
+    {"filename":"src/app.py"},
+    {"filename":"scripts/deploy.sh"},
+    {"filename":".github/workflows/ci.yml"}
+  ]'
+  run scope_detect_stacks <<< "$json"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx 'go'
+  echo "$output" | grep -qx 'python'
+  echo "$output" | grep -qx 'shell'
+  echo "$output" | grep -qx 'actions'
+  # Verify sorted order: actions < go < python < shell
+  first="$(echo "$output" | head -1)"
+  [ "$first" = "actions" ]
+}
+
+@test "detect_stacks: only .md files -> empty output" {
+  json='[
+    {"filename":"README.md"},
+    {"filename":"docs/guide.md"}
+  ]'
+  run scope_detect_stacks <<< "$json"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "detect_stacks: empty array -> empty output" {
+  run scope_detect_stacks <<< '[]'
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "detect_stacks: duplicate filenames -> each token emitted once" {
+  json='[
+    {"filename":"src/a.py"},
+    {"filename":"src/b.py"},
+    {"filename":"lib/c.py"}
+  ]'
+  run scope_detect_stacks <<< "$json"
+  [ "$status" -eq 0 ]
+  count="$(echo "$output" | grep -c 'python' || true)"
+  [ "$count" -eq 1 ]
+}
