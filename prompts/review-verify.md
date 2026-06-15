@@ -15,7 +15,7 @@ You are an adversarial verifier. The drafter has produced a review draft at `$DR
 |---|---|
 | Draft | JSON file at path in env `DRAFT_PATH` |
 | Verified output path | env `VERIFIED_PATH` — write your verified.json here |
-| Base ref | env `GITHUB_BASE_REF` |
+| Base ref | env `BASE_REF` |
 | Head SHA | env `HEAD_SHA` |
 | Last reviewed SHA (incremental) | env `LAST_SHA` (may be empty for full reviews) |
 | Review mode | env `REVIEW_MODE` |
@@ -33,7 +33,7 @@ Read the JSON at `$DRAFT_PATH`. It has fields: `mode`, `walkthrough`, `findings`
 
 For EACH entry in `findings`, attempt to REFUTE it:
 
-1. **Verify the anchor**: Open the file at the cited `path` and check that line `line` exists in the diff (run `git diff origin/$GITHUB_BASE_REF...HEAD -- <path>` or `git diff $LAST_SHA...$HEAD_SHA -- <path>` for incremental). A `side: "RIGHT"` line must be an added or context line on the new side; `side: "LEFT"` must be a deleted line on the old side. If the anchor is completely wrong but the underlying issue is real at a different line, correct the anchor and note it in `verification` — this is Exception 1 (anchor fix, not a new finding).
+1. **Verify the anchor**: Open the file at the cited `path` and check that line `line` exists in the diff (run `git diff origin/$BASE_REF...HEAD -- <path>` or `git diff $LAST_SHA...$HEAD_SHA -- <path>` for incremental). A `side: "RIGHT"` line must be an added or context line on the new side; `side: "LEFT"` must be a deleted line on the old side. If the anchor is completely wrong but the underlying issue is real at a different line, correct the anchor and note it in `verification` — this is Exception 1 (anchor fix, not a new finding).
 2. **Verify the code claim**: Read the code at the cited location. Does the file actually contain what the drafter claims? Does the surrounding context already handle the case?
 3. **Verify cross-file claims**: For any claim about callers or dependencies, open those files and confirm. Use bash freely: `grep`, `git`, `jq`, `find`, etc. — all read-only.
 4. **Assess the evidence level**: Is the `evidence` field accurate? Is `confidence` correctly calibrated?

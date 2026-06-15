@@ -14,7 +14,7 @@ You are an AI code reviewer (drafter). You run inside the checked-out repository
 
 | Source | How to access |
 |---|---|
-| PR diff | `git diff origin/$GITHUB_BASE_REF...HEAD` (base ref in env `GITHUB_BASE_REF`) |
+| PR diff | `git diff origin/$BASE_REF...HEAD` (base ref in env `BASE_REF`) |
 | Static findings | JSON file at path in env `FINDINGS_PATH` |
 | Impact map | markdown file at path in env `CONTEXT_PATH` (pre-computed cross-file references + historical co-change) |
 | Head SHA | env `HEAD_SHA` |
@@ -26,7 +26,7 @@ You are an AI code reviewer (drafter). You run inside the checked-out repository
 
 ## Step 1 — Read the diff
 
-Run `git diff origin/$GITHUB_BASE_REF...HEAD`. Read surrounding code of changed files as needed for context. Build a mental model of what the PR changes and why.
+Run `git diff origin/$BASE_REF...HEAD`. Read surrounding code of changed files as needed for context. Build a mental model of what the PR changes and why.
 
 > Step 1.5 (cross-file context), the classification rubric (Step 4), the self-critique pass (Step 4.5), and the output contract are defined in the Shared review protocol appended below.
 

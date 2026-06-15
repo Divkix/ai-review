@@ -29,7 +29,7 @@
 #   llm-review  opencode runs the review playbook (full or incremental) with
 #               the env contract: FINDINGS_PATH, CONTEXT_PATH, HEAD_SHA,
 #               LAST_SHA, PRIOR_STATE_JSON, PRIOR_REVIEW_ID,
-#               STATUS_COMMENT_ID, GITHUB_BASE_REF, PR_NUMBER.
+#               STATUS_COMMENT_ID, BASE_REF, PR_NUMBER.
 #               Runs with contents:read — the agent reads untrusted PR
 #               content, so its token must not be able to push.
 #   finalize    deterministic post-pass (no LLM): resolve review threads for
@@ -1225,6 +1225,7 @@ jobs:
           MODE: ${{ needs.gate.outputs.mode }}
           LAST_SHA: ${{ needs.gate.outputs.last_sha }}
           HEAD_SHA: ${{ needs.gate.outputs.head_sha }}
+          BASE_REF: ${{ needs.gate.outputs.base_ref }}
           IGNORE_PATTERNS: ${{ needs.gate.outputs.ignore_patterns }}
           INSTRUCTIONS: ${{ needs.gate.outputs.instructions }}
           GUIDELINES_CONTENT: ${{ needs.gate.outputs.guidelines_content }}
@@ -1283,7 +1284,7 @@ jobs:
           HEAD_SHA="$HEAD_SHA" \
           PRIOR_STATE_JSON="${{ needs.gate.outputs.state_json }}" \
           IGNORE_PATHSPECS="$ignore_pathspecs" \
-          envsubst '$GITHUB_BASE_REF $HEAD_SHA $LAST_SHA $REVIEW_MODE $FINDINGS_PATH $CONTEXT_PATH $IGNORE_PATHSPECS $DRAFT_PATH $VERIFIED_PATH $THREADS_PATH $PRIOR_STATE_JSON' \
+          envsubst '$BASE_REF $HEAD_SHA $LAST_SHA $REVIEW_MODE $FINDINGS_PATH $CONTEXT_PATH $IGNORE_PATHSPECS $DRAFT_PATH $VERIFIED_PATH $THREADS_PATH $PRIOR_STATE_JSON' \
             < <(cat "$playbook"; printf '\n\n'; cat ".ai-review-tooling/prompts/review-common.md") \
             > "$RUNNER_TEMP/prompt-draft.md"
 
@@ -1320,7 +1321,7 @@ jobs:
           HEAD_SHA="$HEAD_SHA" \
           PRIOR_STATE_JSON="${{ needs.gate.outputs.state_json }}" \
           IGNORE_PATHSPECS="$ignore_pathspecs" \
-          envsubst '$GITHUB_BASE_REF $HEAD_SHA $LAST_SHA $REVIEW_MODE $FINDINGS_PATH $CONTEXT_PATH $IGNORE_PATHSPECS $DRAFT_PATH $VERIFIED_PATH $THREADS_PATH $PRIOR_STATE_JSON' \
+          envsubst '$BASE_REF $HEAD_SHA $LAST_SHA $REVIEW_MODE $FINDINGS_PATH $CONTEXT_PATH $IGNORE_PATHSPECS $DRAFT_PATH $VERIFIED_PATH $THREADS_PATH $PRIOR_STATE_JSON' \
             < ".ai-review-tooling/prompts/review-verify.md" \
             > "$RUNNER_TEMP/prompt-verify.md"
 
@@ -1420,7 +1421,7 @@ jobs:
           LAST_SHA: ${{ steps.prompt.outputs.effective_last_sha }}
           PRIOR_STATE_JSON: ${{ needs.gate.outputs.state_json }}
           REVIEW_MODE: ${{ steps.prompt.outputs.effective_mode }}
-          GITHUB_BASE_REF: ${{ needs.gate.outputs.base_ref }}
+          BASE_REF: ${{ needs.gate.outputs.base_ref }}
           PR_NUMBER: ${{ needs.gate.outputs.pr }}
           IGNORE_PATHSPECS: ${{ steps.prompt.outputs.ignore_pathspecs }}
         run: |
@@ -1508,7 +1509,7 @@ jobs:
           LAST_SHA: ${{ steps.prompt.outputs.effective_last_sha }}
           PRIOR_STATE_JSON: ${{ needs.gate.outputs.state_json }}
           REVIEW_MODE: ${{ steps.prompt.outputs.effective_mode }}
-          GITHUB_BASE_REF: ${{ needs.gate.outputs.base_ref }}
+          BASE_REF: ${{ needs.gate.outputs.base_ref }}
           PR_NUMBER: ${{ needs.gate.outputs.pr }}
           IGNORE_PATHSPECS: ${{ steps.prompt.outputs.ignore_pathspecs }}
         run: |
@@ -1542,7 +1543,7 @@ jobs:
           HEAD_SHA: ${{ needs.gate.outputs.head_sha }}
           LAST_SHA: ${{ steps.prompt.outputs.effective_last_sha }}
           REVIEW_MODE: ${{ steps.prompt.outputs.effective_mode }}
-          GITHUB_BASE_REF: ${{ needs.gate.outputs.base_ref }}
+          BASE_REF: ${{ needs.gate.outputs.base_ref }}
           STATUS_COMMENT_ID: ${{ needs.gate.outputs.ack_comment_id }}
           TRIGGER_DESC: ${{ needs.gate.outputs.trigger_desc }}
           SIZE_WARNING: ${{ needs.gate.outputs.size_warning }}
@@ -1574,7 +1575,7 @@ jobs:
             git diff "${LAST_SHA}...${HEAD_SHA}" ${IGNORE_PATHSPECS:+-- $IGNORE_PATHSPECS} > "$diff_file" || true
           else
             # shellcheck disable=SC2086
-            git diff "origin/${GITHUB_BASE_REF}...HEAD" ${IGNORE_PATHSPECS:+-- $IGNORE_PATHSPECS} > "$diff_file" || true
+            git diff "origin/${BASE_REF}...HEAD" ${IGNORE_PATHSPECS:+-- $IGNORE_PATHSPECS} > "$diff_file" || true
           fi
 
           # --- 4. Validate anchors ---------------------------------------------
