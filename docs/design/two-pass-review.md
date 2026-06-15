@@ -26,7 +26,7 @@ review in one session) with a three-step pipeline inside the `llm-review` job:
 - Receives: the diff, `findings.json` (static scanner output), and `context.md` (cross-file impact map).
 - Config is locked down via `OPENCODE_CONFIG_CONTENT` (an environment variable injected as the opencode config) so the agent cannot be overridden by a repo-committed `opencode.json`.
 - Has **no GitHub token**: it cannot call the GitHub API even if prompt-injected.
-- Outputs: `drafter_findings.json` — a JSON array of candidate findings with fields `path`, `line`, `severity`, `confidence`, `title`, `body`, `fingerprint`.
+- Outputs: `draft.json` — an object with `walkthrough`, `findings` (each `path`, `line`, `end_line`, `side`, `severity`, `confidence`, `evidence`, `body`, `tool`, `rule_id`), `prior`, and `dropped_static`. Fingerprints are computed deterministically by the posting step, not the LLM.
 
 ### Skeptic (verifier)
 
@@ -34,7 +34,7 @@ review in one session) with a three-step pipeline inside the `llm-review` job:
 - Optionally uses a different model via `verifier_model` / `verifier_variant` workflow inputs (defaults to the same model as the drafter).
 - For each draft finding, it reads the actual file content and attempts to falsify the claim. Findings it cannot support are dropped or demoted.
 - Also has **no GitHub token**.
-- Outputs: `verified_findings.json` — same schema as drafter output, pruned and adjusted.
+- Outputs: `verified.json` — same schema as `draft.json`, pruned and adjusted, plus a `verification` note per surviving finding and a top-level `rejected` array for findings it killed.
 
 ### Deterministic posting (`scripts/lib/post.sh`)
 
