@@ -12,12 +12,49 @@
 #   context.sh independently, then calls context_build_map with an optional
 #   patterns-file argument.
 
+# Parse a YAML list block from stdin config text for a given key.
+# Emits one line per list item (stripped of leading "- " and surrounding quotes).
+# Blank lines and comments reset the in-block flag (same semantics as the
+# original ignore parser). Items that are empty after stripping are skipped.
+#
+# Usage: scope_parse_list <key> <<< "$raw"
+scope_parse_list() {
+  local key="$1"
+  local in_block=0
+  local item line
+  while IFS= read -r line; do
+    # Skip blank lines and comments — also reset block flag on blank/comment.
+    case "$line" in
+      ''|'#'*) in_block=0; continue ;;
+    esac
+    # Detect the target key block.
+    if printf '%s' "$line" | grep -qE "^[[:space:]]*${key}[[:space:]]*:"; then
+      in_block=1
+      continue
+    fi
+    # Another top-level key ends the block.
+    if printf '%s' "$line" | grep -qE '^[[:space:]]*[a-zA-Z_][a-zA-Z0-9_]*[[:space:]]*:'; then
+      in_block=0
+      continue
+    fi
+    if [ "$in_block" = "1" ]; then
+      # List item: "  - value"  or  '  - "value"'
+      if printf '%s' "$line" | grep -qE '^[[:space:]]*-[[:space:]]+'; then
+        item="$(printf '%s' "$line" | sed 's/^[[:space:]]*-[[:space:]]*//' | sed 's/^"//' | sed 's/"$//' | sed "s/^'//" | sed "s/'$//")"
+        [ -n "$item" ] && printf '%s\n' "$item"
+      fi
+    fi
+  done
+}
+
 # Parse .ai-review.yml content from stdin.
 # Emits KEY=VALUE lines to stdout:
 #   valid=true|false
 #   max_changed_files=N      (only when present and numeric)
 #   max_diff_lines=N         (only when present and numeric)
 #   ignore=<pattern>         (zero or more lines, one per list item)
+#   instructions=<item>      (zero or more lines, one per list item; truncated to 500 chars)
+#   guidelines=<path>        (at most one; safe relative path only)
 #
 # Rules:
 # - Empty/absent file (empty stdin) -> valid=true with no other keys (use defaults).
@@ -26,7 +63,9 @@
 # - Unknown keys are ignored (forward-compat).
 # - Any key that looks syntactically wrong (value unparseable) -> valid=false.
 # - Comments (#...) and blank lines are tolerated.
-# - ignore: list items may be:  - "pat"  or  - pat  (with optional leading spaces)
+# - ignore:/instructions: list items may be:  - "pat"  or  - pat  (with optional leading spaces)
+# - Malformed/empty instructions items are skipped — NOT valid=false.
+# - guidelines: unsafe paths (leading / or .. segments) are skipped — NOT valid=false.
 #
 # Usage: scope_parse_config < /path/to/.ai-review.yml
 scope_parse_config() {
@@ -67,36 +106,33 @@ scope_parse_config() {
     fi
   fi
 
-  # Parse ignore list. Lines following "ignore:" that match list-item patterns.
-  # Collect them: items are lines matching /^\s*-\s+/ after stripping quotes.
-  local in_ignore=0
-  local pat line
-  while IFS= read -r line; do
-    # Skip blank lines and comments.
-    case "$line" in
-      ''|'#'*) in_ignore=0; continue ;;
-    esac
-    # Strip trailing comments (# not inside quotes is unlikely in paths, but safe).
-    # Detect the "ignore:" key.
-    if printf '%s' "$line" | grep -qE '^[[:space:]]*ignore[[:space:]]*:'; then
-      in_ignore=1
-      continue
+  # Parse ignore list using shared helper.
+  local pat
+  while IFS= read -r pat; do
+    printf 'ignore=%s\n' "$pat"
+  done < <(scope_parse_list "ignore" <<< "$raw")
+
+  # Parse instructions list using shared helper.
+  # Items are truncated to 500 chars. Malformed items are skipped (NOT valid=false).
+  local item
+  while IFS= read -r item; do
+    if [ -n "$item" ]; then
+      # Truncate to 500 chars.
+      item="$(printf '%s' "$item" | cut -c1-500)"
+      printf 'instructions=%s\n' "$item"
     fi
-    # Another top-level key ends the ignore block.
-    if printf '%s' "$line" | grep -qE '^[[:space:]]*[a-zA-Z_][a-zA-Z0-9_]*[[:space:]]*:'; then
-      in_ignore=0
-      continue
+  done < <(scope_parse_list "instructions" <<< "$raw")
+
+  # Parse guidelines scalar (safe relative path only).
+  local guidelines_raw
+  guidelines_raw="$(printf '%s\n' "$raw" | grep -E '^[[:space:]]*guidelines[[:space:]]*:' | head -1 | sed 's/^[[:space:]]*guidelines[[:space:]]*:[[:space:]]*//' | tr -d '[:space:]' | sed "s/^['\"]//;s/['\"]$//")"
+  if [ -n "$guidelines_raw" ]; then
+    # Validate: no leading /, no .. segment.
+    if ! printf '%s' "$guidelines_raw" | grep -qE '^/' && \
+       ! printf '%s' "$guidelines_raw" | grep -qE '(^|/)\.\.(/|$)'; then
+      printf 'guidelines=%s\n' "$guidelines_raw"
     fi
-    if [ "$in_ignore" = "1" ]; then
-      # List item: "  - pattern"  or  '  - "pattern"'
-      if printf '%s' "$line" | grep -qE '^[[:space:]]*-[[:space:]]+'; then
-        pat="$(printf '%s' "$line" | sed 's/^[[:space:]]*-[[:space:]]*//' | sed 's/^"//' | sed 's/"$//' | sed "s/^'//" | sed "s/'$//")"
-        if [ -n "$pat" ]; then
-          printf 'ignore=%s\n' "$pat"
-        fi
-      fi
-    fi
-  done <<< "$raw"
+  fi
 
   printf 'valid=true\n'
   if [ -n "$max_files" ]; then printf 'max_changed_files=%s\n' "$max_files"; fi
