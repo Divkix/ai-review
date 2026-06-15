@@ -69,6 +69,10 @@ fi
 # --- 3b: scanner binary + rules-ref pin consistency -------------------------
 REVIEW_WF=.github/workflows/review.yml
 
+# Single source-of-truth tool list — used by BOTH the consistency loop and the
+# live-verification loop below. Add/remove tools here only.
+TOOLS=(OPENGREP GITLEAKS OSV_SCANNER RIPGREP)
+
 # Per-tool: assert exactly one distinct VERSION and one distinct SHA256.
 # URL templates use $ver below (set per-tool).
 declare -A TOOL_URL
@@ -77,7 +81,7 @@ TOOL_URL[GITLEAKS]="https://github.com/gitleaks/gitleaks/releases/download/v\${v
 TOOL_URL[OSV_SCANNER]="https://github.com/google/osv-scanner/releases/download/v\${ver}/osv-scanner_linux_amd64"
 TOOL_URL[RIPGREP]="https://github.com/BurntSushi/ripgrep/releases/download/\${ver}/ripgrep-\${ver}-x86_64-unknown-linux-musl.tar.gz"
 
-for tool in OPENGREP GITLEAKS OSV_SCANNER RIPGREP; do
+for tool in "${TOOLS[@]}"; do
   mapfile -t tool_versions < <(grep -hoE "${tool}_VERSION=\"[^\"]+\"" "$REVIEW_WF" \
     | sed -E 's/.*="([^"]+)"/\1/' | sort -u)
   mapfile -t tool_shas < <(grep -hoE "${tool}_SHA256=\"[0-9a-f]+\"" "$REVIEW_WF" \
@@ -116,7 +120,7 @@ if [ "${CHECK_PINS_OFFLINE:-0}" = "1" ]; then
 elif [ "$fail" -eq 0 ]; then
   tmp_scanner="$(mktemp)"
   trap 'rm -f "$tmp_scanner"' EXIT
-  for tool in OPENGREP GITLEAKS OSV_SCANNER RIPGREP; do
+  for tool in "${TOOLS[@]}"; do
     mapfile -t tv < <(grep -hoE "${tool}_VERSION=\"[^\"]+\"" "$REVIEW_WF" \
       | sed -E 's/.*="([^"]+)"/\1/' | sort -u)
     mapfile -t ts < <(grep -hoE "${tool}_SHA256=\"[0-9a-f]+\"" "$REVIEW_WF" \
