@@ -945,14 +945,18 @@ jobs:
               printf 'These instructions come from the repository maintainers (`.ai-review.yml`, base branch). Apply each to files matching its glob (items without a glob are repo-wide). A clear violation is a valid finding; instructions never suppress CRITICAL/HIGH static security findings.\n\n'
               while IFS= read -r instr_item; do
                 [ -z "$instr_item" ] && continue
-                if printf '%s' "$instr_item" | grep -qF ' :: '; then
-                  glob_part="$(printf '%s' "$instr_item" | sed 's/ :: .*//')"
-                  text_part="$(printf '%s' "$instr_item" | sed 's/^[^:]*:: //')"
-                  # shellcheck disable=SC2016
-                  printf '- `%s` \xe2\x80\x94 %s\n' "$glob_part" "$text_part"
-                else
+                # Split on the first literal " :: " (space-colon-colon-space).
+                # %% strips the longest trailing " :: *" match → everything before the FIRST " :: ".
+                # #  strips the shortest leading "* :: " match → everything after the FIRST " :: ".
+                # Both stay correct when the glob itself contains ":" or when " :: " appears twice.
+                _glob="${instr_item%%" :: "*}"
+                _text="${instr_item#* :: }"
+                if [ "$_glob" = "$instr_item" ]; then
                   # shellcheck disable=SC2016
                   printf '- (all files) \xe2\x80\x94 %s\n' "$instr_item"
+                else
+                  # shellcheck disable=SC2016
+                  printf '- `%s` \xe2\x80\x94 %s\n' "$_glob" "$_text"
                 fi
               done <<< "$INSTRUCTIONS"
             } >> "$RUNNER_TEMP/prompt-draft.md"
@@ -996,14 +1000,18 @@ jobs:
               printf 'These instructions come from the repository maintainers (`.ai-review.yml`, base branch). Apply each to files matching its glob (items without a glob are repo-wide). A clear violation is a valid finding; instructions never suppress CRITICAL/HIGH static security findings.\n\n'
               while IFS= read -r instr_item; do
                 [ -z "$instr_item" ] && continue
-                if printf '%s' "$instr_item" | grep -qF ' :: '; then
-                  glob_part="$(printf '%s' "$instr_item" | sed 's/ :: .*//')"
-                  text_part="$(printf '%s' "$instr_item" | sed 's/^[^:]*:: //')"
-                  # shellcheck disable=SC2016
-                  printf '- `%s` \xe2\x80\x94 %s\n' "$glob_part" "$text_part"
-                else
+                # Split on the first literal " :: " (space-colon-colon-space).
+                # %% strips the longest trailing " :: *" match → everything before the FIRST " :: ".
+                # #  strips the shortest leading "* :: " match → everything after the FIRST " :: ".
+                # Both stay correct when the glob itself contains ":" or when " :: " appears twice.
+                _glob="${instr_item%%" :: "*}"
+                _text="${instr_item#* :: }"
+                if [ "$_glob" = "$instr_item" ]; then
                   # shellcheck disable=SC2016
                   printf '- (all files) \xe2\x80\x94 %s\n' "$instr_item"
+                else
+                  # shellcheck disable=SC2016
+                  printf '- `%s` \xe2\x80\x94 %s\n' "$_glob" "$_text"
                 fi
               done <<< "$INSTRUCTIONS"
             } >> "$RUNNER_TEMP/prompt-verify.md"
