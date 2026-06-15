@@ -71,7 +71,7 @@ REVIEW_WF=.github/workflows/review.yml
 
 # Single source-of-truth tool list — used by BOTH the consistency loop and the
 # live-verification loop below. Add/remove tools here only.
-TOOLS=(OPENGREP GITLEAKS OSV_SCANNER RIPGREP)
+TOOLS=(OPENGREP GITLEAKS OSV_SCANNER RIPGREP RUFF GOLANGCI OXLINT SHELLCHECK HADOLINT ACTIONLINT ZIZMOR TRIVY TYPOS)
 
 # Per-tool: assert exactly one distinct VERSION and one distinct SHA256.
 # URL templates use $ver below (set per-tool).
@@ -80,6 +80,15 @@ TOOL_URL[OPENGREP]="https://github.com/opengrep/opengrep/releases/download/v\${v
 TOOL_URL[GITLEAKS]="https://github.com/gitleaks/gitleaks/releases/download/v\${ver}/gitleaks_\${ver}_linux_x64.tar.gz"
 TOOL_URL[OSV_SCANNER]="https://github.com/google/osv-scanner/releases/download/v\${ver}/osv-scanner_linux_amd64"
 TOOL_URL[RIPGREP]="https://github.com/BurntSushi/ripgrep/releases/download/\${ver}/ripgrep-\${ver}-x86_64-unknown-linux-musl.tar.gz"
+TOOL_URL[RUFF]="https://github.com/astral-sh/ruff/releases/download/\${ver}/ruff-x86_64-unknown-linux-gnu.tar.gz"
+TOOL_URL[GOLANGCI]="https://github.com/golangci/golangci-lint/releases/download/v\${ver}/golangci-lint-\${ver}-linux-amd64.tar.gz"
+TOOL_URL[OXLINT]="https://github.com/oxc-project/oxc/releases/download/\${ver}/oxlint-x86_64-unknown-linux-gnu.tar.gz"
+TOOL_URL[SHELLCHECK]="https://github.com/koalaman/shellcheck/releases/download/\${ver}/shellcheck-\${ver}.linux.x86_64.tar.xz"
+TOOL_URL[HADOLINT]="https://github.com/hadolint/hadolint/releases/download/\${ver}/hadolint-linux-x86_64"
+TOOL_URL[ACTIONLINT]="https://github.com/rhysd/actionlint/releases/download/v\${ver}/actionlint_\${ver}_linux_amd64.tar.gz"
+TOOL_URL[ZIZMOR]="https://github.com/zizmorcore/zizmor/releases/download/\${ver}/zizmor-x86_64-unknown-linux-gnu.tar.gz"
+TOOL_URL[TRIVY]="https://github.com/aquasecurity/trivy/releases/download/v\${ver}/trivy_\${ver}_Linux-64bit.tar.gz"
+TOOL_URL[TYPOS]="https://github.com/crate-ci/typos/releases/download/\${ver}/typos-\${ver}-x86_64-unknown-linux-musl.tar.gz"
 
 for tool in "${TOOLS[@]}"; do
   mapfile -t tool_versions < <(grep -hoE "${tool}_VERSION=\"[^\"]+\"" "$REVIEW_WF" \
