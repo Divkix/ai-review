@@ -382,6 +382,32 @@ A relative path to a long-form review guidelines file in the repo. Validation:
 
 Fetched from the base branch via the Contents API (`?ref=${BASE_REF}`, same pattern as `.ai-review.yml` itself). Capped at 16 384 bytes; if the raw content exceeds that, the injected text ends with `\n... [guidelines truncated]`. On fetch failure (404, network error): empty output, silent fail-open — no `config_warning` emitted.
 
+### Auto-detected guidelines (`auto_guidelines:` toggle)
+
+In addition to the explicit `guidelines:` path, the reviewer auto-detects well-known agent-rule files from the base branch and injects them as review guidelines.
+
+**Sources, in priority order** (first-wins on content dedup):
+1. the explicit `guidelines:` file (if set)
+2. `AGENTS.md`
+3. `CLAUDE.md`
+4. `.cursorrules`
+5. `.github/copilot-instructions.md`
+6. `.windsurfrules`
+7. every `*.mdc` file directly under `.cursor/rules/` — **one directory level only, not recursive**
+
+**Detection semantics**:
+- **Base-branch only**: every source is fetched from `origin/${BASE_REF}` via the Contents API — the same absolute trust rule as §1 and all other keys. A PR cannot inject its own guidelines by modifying the PR head.
+- **Case-sensitive**: detection is by canonical filename; lowercase `agents.md` is NOT matched.
+- **Content-deduped**: sources with identical content collapse to one (e.g. a `CLAUDE.md` symlinked to `AGENTS.md`), with priority order deciding which path wins.
+- **Budget**: each source is capped at 16 KB; the combined guidelines section is capped at 48 KB. Truncation markers are appended when either cap is exceeded.
+- **Fail-open**: any fetch error (missing file, oversized file, directory, broken symlink) silently skips that source — never a hard fail.
+
+**`auto_guidelines:` (bool, optional, default `true`)**: set to `false` to disable auto-detection entirely. The explicit `guidelines:` file is still used regardless of this toggle.
+
+### Rendering (no code fence)
+
+The combined guidelines are rendered under a single `## Repo guidelines` H2, with each source introduced by a `### Guideline source: <path>` sub-header. The section is **not** wrapped in a code fence. This fixes a latent bug: guideline files containing their own ``` fences would otherwise close the wrapping fence early and corrupt the rest of the prompt.
+
 ### Base-branch trust (same as all other keys)
 
 Both keys are read exclusively from the base branch — the same absolute rule as §1. A PR author cannot inject instructions or guidelines by modifying the PR head. The PR adding these keys to the base branch is itself reviewed under the prior (or absent) config — same as branch protection rules.

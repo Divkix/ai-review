@@ -101,13 +101,16 @@ instructions:
   - "api/** :: Flag handlers missing input validation."
   - "Prefer explicit error wrapping."   # no glob -> applies to all files
 guidelines: docs/review-guidelines.md
+auto_guidelines: false    # optional; default true (auto-detect agent-rule files)
 ```
 
 **`instructions:`** — a list of review directives. Each item is either `"<glob> :: <text>"` (applies to files matching the glob) or a plain string (repo-wide). Text is truncated to 500 characters per item. Malformed items are skipped individually and do not invalidate the rest of the config.
 
 **`guidelines:`** — a relative path to a long-form review guidelines file in your repo. The file is fetched from the base branch and injected into the review prompt (capped at 16 KB). Unsafe paths (leading `/` or `..` segments) are silently ignored. On fetch failure the field is silently omitted — no hard fail.
 
-Both keys follow the same base-branch trust rule: they are read from the base branch only, never the PR head.
+**Auto-detected guidelines** — in addition to any explicit `guidelines:` path, the reviewer auto-detects well-known agent-rule files from the base branch and injects them as review guidelines. Sources, in priority order (first-wins on content dedup): the explicit `guidelines:` file, then `AGENTS.md`, `CLAUDE.md`, `.cursorrules`, `.github/copilot-instructions.md`, `.windsurfrules`, and every `*.mdc` file directly under `.cursor/rules/` (one directory level, not recursive). Detection is by canonical filename and is case-sensitive (`agents.md` is not matched). Sources are deduped by content (e.g. a `CLAUDE.md` symlinked to `AGENTS.md` collapses to one). Each source is capped at 16 KB and the combined guidelines section at 48 KB, with truncation markers when exceeded. Any fetch error (missing file, oversized file, directory, broken symlink) silently skips that source. Set **`auto_guidelines: false`** to disable auto-detection (default is on); the explicit `guidelines:` file is still used regardless.
+
+All of these keys follow the same base-branch trust rule: they are read from the base branch only, never the PR head — a PR cannot inject its own guidelines.
 
 **Where it lives**: the file is read from the **base branch** only, never from the PR head. This closes a threat: a PR author cannot write an `.ai-review.yml` that ignores their own sensitive changes. The config PR itself is reviewed with the old (or absent) config — same behavior as branch protection rules.
 
@@ -155,6 +158,7 @@ Both keys follow the same base-branch trust rule: they are read from the base br
 - No auto-resolve UI buttons (no "Fix all").
 - No cross-PR memory; incremental state is per-PR.
 - Path filters use simplified glob matching (bash fnmatch, not full gitignore semantics) — advanced patterns like character classes or negation are not supported; see `docs/design/pr-scope-config.md`.
+- Auto-detected guidelines scan `.cursor/rules/` one directory level only (not recursive), and filename detection is case-sensitive (`agents.md` is not matched).
 - The `context` job is heuristic identifier grep, not a real call graph — expect occasional false leads, and on large repos the sweep adds latency.
 - Review posting (inline comments, verdict, state marker) is deterministic workflow bash (`scripts/lib/post.sh`); the LLM passes write candidate findings files, not GitHub API calls.
 - Gitleaks runs in full git mode, so the first run scans the whole repo history.

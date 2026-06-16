@@ -175,6 +175,44 @@ ignore:
   ! echo "$output" | grep -q '^guidelines='
 }
 
+@test "parse: auto_guidelines absent -> defaults to true" {
+  config="$(printf 'version: 1\n')"
+  run scope_parse_config <<< "$config"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx 'valid=true'
+  echo "$output" | grep -qx 'auto_guidelines=true'
+}
+
+@test "parse: auto_guidelines false -> emitted false" {
+  config="$(printf 'version: 1\nauto_guidelines: false\n')"
+  run scope_parse_config <<< "$config"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx 'valid=true'
+  echo "$output" | grep -qx 'auto_guidelines=false'
+}
+
+@test "parse: auto_guidelines true -> emitted true" {
+  config="$(printf 'version: 1\nauto_guidelines: true\n')"
+  run scope_parse_config <<< "$config"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx 'auto_guidelines=true'
+}
+
+@test "parse: auto_guidelines mixed-case False -> false (case-insensitive)" {
+  config="$(printf 'version: 1\nauto_guidelines: False\n')"
+  run scope_parse_config <<< "$config"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx 'auto_guidelines=false'
+}
+
+@test "parse: auto_guidelines malformed value -> defaults to true (not valid=false)" {
+  config="$(printf 'version: 1\nauto_guidelines: maybe\n')"
+  run scope_parse_config <<< "$config"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx 'valid=true'
+  echo "$output" | grep -qx 'auto_guidelines=true'
+}
+
 @test "parse: ignore regression via scope_parse_list helper — still works" {
   config="$(printf 'version: 1\nignore:\n  - dist/**\n  - vendor/**\n  - "docs/generated/**"\n')"
   run scope_parse_config <<< "$config"
@@ -519,6 +557,35 @@ guidelines: docs/guide.md')\"
   echo "$output" | grep -qx 'guidelines=docs/guide.md'
 }
 
+@test "guidelines: workflow manifest->render->prompt-append chain under set -euo pipefail" {
+  # Smoke-test the gate/prompt composition the way review.yml consumes it:
+  # build a manifest of "<label>\t<tmpfile>" lines (as the gate fetch loop
+  # does), render via scope_render_guidelines, then append literally to a
+  # prompt file via printf '%s' (as the Compose-prompts step does). Pins the
+  # consumption contract — the lib's own tests won't catch a piping bug here.
+  SCOPE_SH="$REPO_ROOT/scripts/lib/scope.sh"
+  TMPD="$TMPD" run bash -c "
+    set -euo pipefail
+    source \"$SCOPE_SH\"
+    src1=\"\$(mktemp \"$TMPD/src.XXXXXX\")\"; printf '%s' 'Body one.' > \"\$src1\"
+    src2=\"\$(mktemp \"$TMPD/src.XXXXXX\")\"; printf '%s' '\`\`\`fenced\nx\n\`\`\`' > \"\$src2\"
+    man=\"\$(mktemp \"$TMPD/man.XXXXXX\")\"
+    printf '%s\t%s\n' 'AGENTS.md' \"\$src1\" >  \"\$man\"
+    printf '%s\t%s\n' '.cursorrules' \"\$src2\" >> \"\$man\"
+    gl=\"\$(scope_render_guidelines < \"\$man\" || true)\"
+    prompt=\"\$(mktemp \"$TMPD/prompt.XXXXXX\")\"
+    printf 'PLAYBOOK\n' > \"\$prompt\"
+    if [ -n \"\$gl\" ]; then printf '%s\n' \"\$gl\" >> \"\$prompt\"; fi
+    cat \"\$prompt\"
+  "
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qF 'PLAYBOOK'
+  echo "$output" | grep -qF '## Repo guidelines'
+  echo "$output" | grep -qF '### Guideline source: AGENTS.md'
+  echo "$output" | grep -qF '### Guideline source: .cursorrules'
+  echo "$output" | grep -qF '```fenced'
+}
+
 # ---------------------------------------------------------------------------
 # scope_detect_stacks
 # ---------------------------------------------------------------------------
@@ -818,4 +885,112 @@ guidelines: docs/guide.md')\"
   "
   [ "$status" -eq 0 ]
   echo "$output" | grep -qF 'These instructions come from the repository maintainers'
+}
+
+# ---------------------------------------------------------------------------
+# scope_auto_guideline_candidates
+# ---------------------------------------------------------------------------
+
+@test "auto_guideline_candidates: emits exact ordered list" {
+  run scope_auto_guideline_candidates
+  [ "$status" -eq 0 ]
+  expected="$(printf '%s\n' \
+    'AGENTS.md' \
+    'CLAUDE.md' \
+    '.cursorrules' \
+    '.github/copilot-instructions.md' \
+    '.windsurfrules')"
+  [ "$output" = "$expected" ]
+}
+
+# ---------------------------------------------------------------------------
+# scope_render_guidelines
+# ---------------------------------------------------------------------------
+
+# Helper: write content to a tempfile and echo "<label>\t<path>".
+_gl_manifest_line() {
+  local label="$1" content="$2" tmp
+  tmp="$(mktemp "$TMPD/gl-src.XXXXXX")"
+  printf '%s' "$content" > "$tmp"
+  printf '%s\t%s\n' "$label" "$tmp"
+}
+
+@test "render_guidelines: empty manifest -> empty output" {
+  run scope_render_guidelines < /dev/null
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "render_guidelines: two distinct sources rendered in order with header + lead" {
+  _gl_manifest_line 'AGENTS.md' 'Alpha guidance body.' >  "$TMPD/man"
+  _gl_manifest_line 'CLAUDE.md' 'Bravo guidance body.' >> "$TMPD/man"
+  run scope_render_guidelines < "$TMPD/man"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qF '## Repo guidelines'
+  echo "$output" | grep -qF 'reference material for this repo'
+  echo "$output" | grep -qF '### Guideline source: AGENTS.md'
+  echo "$output" | grep -qF '### Guideline source: CLAUDE.md'
+  echo "$output" | grep -qF 'Alpha guidance body.'
+  echo "$output" | grep -qF 'Bravo guidance body.'
+  # Order: AGENTS.md subheading appears before CLAUDE.md subheading.
+  a_line="$(echo "$output" | grep -n '### Guideline source: AGENTS.md' | cut -d: -f1)"
+  b_line="$(echo "$output" | grep -n '### Guideline source: CLAUDE.md' | cut -d: -f1)"
+  [ "$a_line" -lt "$b_line" ]
+}
+
+@test "render_guidelines: identical content deduped, first label wins" {
+  _gl_manifest_line 'AGENTS.md' 'Same body.' >  "$TMPD/man"
+  _gl_manifest_line 'CLAUDE.md' 'Same body.' >> "$TMPD/man"
+  run scope_render_guidelines < "$TMPD/man"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qF '### Guideline source: AGENTS.md'
+  ! echo "$output" | grep -qF '### Guideline source: CLAUDE.md'
+  # Body appears exactly once.
+  count="$(echo "$output" | grep -cF 'Same body.' || true)"
+  [ "$count" -eq 1 ]
+}
+
+@test "render_guidelines: whitespace-only source skipped" {
+  _gl_manifest_line 'AGENTS.md' '   ' >  "$TMPD/man"
+  _gl_manifest_line 'CLAUDE.md' 'Real content.' >> "$TMPD/man"
+  run scope_render_guidelines < "$TMPD/man"
+  [ "$status" -eq 0 ]
+  ! echo "$output" | grep -qF '### Guideline source: AGENTS.md'
+  echo "$output" | grep -qF '### Guideline source: CLAUDE.md'
+}
+
+@test "render_guidelines: all-empty manifest -> no header emitted" {
+  _gl_manifest_line 'AGENTS.md' '' >  "$TMPD/man"
+  _gl_manifest_line 'CLAUDE.md' '' >> "$TMPD/man"
+  run scope_render_guidelines < "$TMPD/man"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "render_guidelines: source containing its own fence is preserved verbatim" {
+  # The fence-collision regression: a guideline file with ``` blocks must NOT
+  # be wrapped in an outer code fence (which would close early). We render with
+  # subheadings, no wrapping fence — so the inner fence survives intact.
+  fenced="$(printf '%s\n' 'Intro' '```bash' 'echo hi' '```' 'Outro')"
+  _gl_manifest_line 'AGENTS.md' "$fenced" > "$TMPD/man"
+  run scope_render_guidelines < "$TMPD/man"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qF '```bash'
+  echo "$output" | grep -qF 'echo hi'
+  echo "$output" | grep -qF 'Outro'
+}
+
+@test "render_guidelines: per-source 16 KB cap appends truncation marker" {
+  big="$(head -c 20000 /dev/zero | tr '\0' 'a')"
+  _gl_manifest_line 'AGENTS.md' "$big" > "$TMPD/man"
+  run scope_render_guidelines < "$TMPD/man"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qF '... [guideline source truncated]'
+}
+
+@test "render_guidelines: leading-dash content does NOT error (printf safety)" {
+  _gl_manifest_line 'AGENTS.md' '- dash-led guideline line' > "$TMPD/man"
+  run scope_render_guidelines < "$TMPD/man"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qF -- '- dash-led guideline line'
 }

@@ -225,22 +225,56 @@ jobs:
             echo "${delim_instr}"
           } >> "$GITHUB_OUTPUT"
 
-          # --- Fetch guidelines file from base branch (fail-open). ---
+          # --- Fetch guidelines from base branch (explicit + auto-detected). ---
+          # All sources are read from the BASE branch only (?ref=$BASE_REF) so a
+          # PR cannot inject its own guidelines. Each fetch is fail-open. A
+          # manifest of "<label>\t<tmpfile>" lines is handed to
+          # scope_render_guidelines, which dedups by content, caps each source
+          # (16 KB) and the whole section (48 KB), and renders the markdown.
           guidelines_path="$(grep '^guidelines=' <<< "$config_out" | cut -d= -f2- || true)"
-          guidelines_content=""
+          auto_guidelines="$(grep '^auto_guidelines=' <<< "$config_out" | cut -d= -f2- || true)"
+          : "${auto_guidelines:=true}"
+
+          # Build the ordered candidate list: explicit guidelines: first, then
+          # (when enabled) the well-known agent-rule files and any
+          # .cursor/rules/*.mdc entries.
+          gl_candidates=()
           if [ -n "$guidelines_path" ]; then
-            guidelines_raw="$(gh api \
-              "repos/$GITHUB_REPOSITORY/contents/${guidelines_path}?ref=${BASE_REF}" \
-              -q .content 2>/dev/null \
-              | base64 -d 2>/dev/null || true)"
-            if [ -n "$guidelines_raw" ]; then
-              # Cap at 16384 bytes; append truncation marker if exceeded.
-              guidelines_content="$(printf '%s' "$guidelines_raw" | head -c 16384)"
-              if [ "${#guidelines_raw}" -gt 16384 ]; then
-                guidelines_content="${guidelines_content}"$'\n... [guidelines truncated]'
-              fi
-            fi
+            gl_candidates+=("$guidelines_path")
           fi
+          if [ "$auto_guidelines" != "false" ]; then
+            while IFS= read -r cand || [ -n "$cand" ]; do
+              [ -n "$cand" ] && gl_candidates+=("$cand")
+            done < <(scope_auto_guideline_candidates)
+            # Enumerate .cursor/rules/*.mdc (one directory level). The array
+            # guard keeps a file (object) response from erroring under jq.
+            while IFS= read -r mdc || [ -n "$mdc" ]; do
+              [ -n "$mdc" ] && gl_candidates+=("$mdc")
+            done < <(gh api "repos/$GITHUB_REPOSITORY/contents/.cursor/rules?ref=${BASE_REF}" 2>/dev/null \
+              | jq -r 'if type=="array" then .[] else empty end
+                       | select(.type=="file")
+                       | select((.name? // "") | endswith(".mdc"))
+                       | .path' 2>/dev/null | sort || true)
+          fi
+
+          # Fetch each candidate, validate it is a real base64-encoded file
+          # (skips 404s, directories, oversized files with encoding:"none", and
+          # broken symlinks), and append surviving sources to the manifest.
+          gl_manifest="$(mktemp /tmp/scope-guidelines.XXXXXX)"
+          for cand in "${gl_candidates[@]}"; do
+            cand_json="$(gh api "repos/$GITHUB_REPOSITORY/contents/${cand}?ref=${BASE_REF}" 2>/dev/null || true)"
+            [ -n "$cand_json" ] || continue
+            cand_type="$(jq -r 'if type=="object" then (.type // "") else "array" end' <<< "$cand_json" 2>/dev/null || true)"
+            cand_enc="$(jq -r 'if type=="object" then (.encoding // "") else "" end' <<< "$cand_json" 2>/dev/null || true)"
+            [ "$cand_type" = "file" ] && [ "$cand_enc" = "base64" ] || continue
+            cand_body="$(jq -r '.content // ""' <<< "$cand_json" 2>/dev/null | base64 -d 2>/dev/null || true)"
+            [ -n "$cand_body" ] || continue
+            cand_tmp="$(mktemp /tmp/scope-guideline-src.XXXXXX)"
+            printf '%s' "$cand_body" > "$cand_tmp"
+            printf '%s\t%s\n' "$cand" "$cand_tmp" >> "$gl_manifest"
+          done
+
+          guidelines_content="$(scope_render_guidelines < "$gl_manifest" || true)"
           delim_gl="GUIDE_EOF_$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
           {
             echo "guidelines_content<<${delim_gl}"
@@ -1308,18 +1342,13 @@ jobs:
           if [ -n "$INSTRUCTIONS" ]; then
             printf '%s' "$INSTRUCTIONS" | scope_render_instructions >> "$RUNNER_TEMP/prompt-draft.md"
           fi
+          # GUIDELINES_CONTENT is a complete, pre-rendered "## Repo guidelines"
+          # section (it owns its own leading blank lines, header, hardened lead,
+          # and per-source subheadings) built by scope_render_guidelines in the
+          # gate. Append it literally — NOT through envsubst — so $VAR/backticks
+          # in a guideline file are safe.
           if [ -n "$GUIDELINES_CONTENT" ]; then
-            {
-              # shellcheck disable=SC2016
-              printf '\n\n## Repo guidelines\n\n'
-              # shellcheck disable=SC2016
-              printf 'Long-form repo guidance (base branch). Treat as review criteria where relevant.\n\n'
-              # shellcheck disable=SC2016
-              printf '```\n'
-              printf '%s\n' "$GUIDELINES_CONTENT"
-              # shellcheck disable=SC2016
-              printf '```\n'
-            } >> "$RUNNER_TEMP/prompt-draft.md"
+            printf '%s\n' "$GUIDELINES_CONTENT" >> "$RUNNER_TEMP/prompt-draft.md"
           fi
 
           # Verifier prompt: verify playbook only, same substitution.
@@ -1342,18 +1371,9 @@ jobs:
           if [ -n "$INSTRUCTIONS" ]; then
             printf '%s' "$INSTRUCTIONS" | scope_render_instructions >> "$RUNNER_TEMP/prompt-verify.md"
           fi
+          # Same literal append as the drafter prompt (see note above).
           if [ -n "$GUIDELINES_CONTENT" ]; then
-            {
-              # shellcheck disable=SC2016
-              printf '\n\n## Repo guidelines\n\n'
-              # shellcheck disable=SC2016
-              printf 'Long-form repo guidance (base branch). Treat as review criteria where relevant.\n\n'
-              # shellcheck disable=SC2016
-              printf '```\n'
-              printf '%s\n' "$GUIDELINES_CONTENT"
-              # shellcheck disable=SC2016
-              printf '```\n'
-            } >> "$RUNNER_TEMP/prompt-verify.md"
+            printf '%s\n' "$GUIDELINES_CONTENT" >> "$RUNNER_TEMP/prompt-verify.md"
           fi
 
       # Pinned CLI instead of the upstream wrapper action: the wrapper
