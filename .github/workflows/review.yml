@@ -1069,11 +1069,19 @@ jobs:
             printf '%s\n' "$IGNORE_PATTERNS" >> "$patterns_file"
           fi
           scope_builtin_ignores >> "$patterns_file"
+          # Resolve an explicit merge-base for the full-mode range: the `A...B`
+          # shorthand silently yields an EMPTY diff when CI hasn't fetched the
+          # history needed to find the merge-base, which would blank the impact
+          # map, co-change leads, and the ast-grep def/ref section. Deepen and
+          # compute it; fall back to a two-dot range so the map is never empty.
           if [ "$MODE" = incremental ] && [ -n "$LAST_SHA" ] \
             && git cat-file -e "${LAST_SHA}^{commit}" 2>/dev/null; then
-            range="${LAST_SHA}...HEAD"
+            range="${LAST_SHA}..HEAD"
           else
-            range="origin/${BASE_REF}...HEAD"
+            git fetch --deepen=200 origin "${BASE_REF}" >/dev/null 2>&1 || true
+            mb="$(git merge-base "origin/${BASE_REF}" HEAD 2>/dev/null || true)"
+            [ -n "$mb" ] || mb="origin/${BASE_REF}"
+            range="${mb}..HEAD"
           fi
           echo "Impact range: $range"
           # Split byte budget: impact map 52 KB + co-change 8 KB = 60 KB total.
@@ -1582,14 +1590,23 @@ jobs:
           minors_from_budget="$(jq -c '.minors' <<<"$budget_json")"
 
           # --- 3. Build the anchor diff ----------------------------------------
+          # Resolve the merge-base EXPLICITLY rather than via the `A...B`
+          # shorthand: in CI the base ref is often fetched without the history
+          # `git diff origin/BASE...HEAD` needs to find the merge-base, which
+          # silently produces an EMPTY diff and demotes every inline comment to
+          # the minors block. Deepen the base fetch, compute the merge-base, and
+          # fall back to a two-dot diff so the anchor diff is never silently empty.
           diff_file="$RUNNER_TEMP/review.diff"
           if [ "$REVIEW_MODE" = "incremental" ] && [ -n "$LAST_SHA" ]; then
-            # shellcheck disable=SC2086  # IGNORE_PATHSPECS intentionally word-splits
-            git diff "${LAST_SHA}...${HEAD_SHA}" ${IGNORE_PATHSPECS:+-- $IGNORE_PATHSPECS} > "$diff_file" || true
+            from_ref="$LAST_SHA"
           else
-            # shellcheck disable=SC2086
-            git diff "origin/${BASE_REF}...HEAD" ${IGNORE_PATHSPECS:+-- $IGNORE_PATHSPECS} > "$diff_file" || true
+            git fetch --deepen=200 origin "${BASE_REF}" >/dev/null 2>&1 || true
+            from_ref="$(git merge-base "origin/${BASE_REF}" HEAD 2>/dev/null || true)"
+            [ -n "$from_ref" ] || from_ref="origin/${BASE_REF}"
           fi
+          # shellcheck disable=SC2086  # IGNORE_PATHSPECS intentionally word-splits
+          git diff "${from_ref}" HEAD ${IGNORE_PATHSPECS:+-- $IGNORE_PATHSPECS} > "$diff_file" || true
+          echo "::notice::post-git: base=$BASE_REF from_ref=${from_ref:0:12} range_commits=$(git rev-list --count "${from_ref}..HEAD" 2>/dev/null || echo ERR)"
 
           # --- 4. Validate anchors ---------------------------------------------
           anchor_result="$(post_validate_anchors "$diff_file" <<<"$inline_candidates")"
