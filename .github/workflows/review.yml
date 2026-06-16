@@ -1596,6 +1596,9 @@ jobs:
           valid_inline="$(jq -c '.valid' <<<"$anchor_result")"
           demoted="$(jq -c '.demoted' <<<"$anchor_result")"
 
+          # Posting diagnostics (operational visibility into the inline budget).
+          echo "::notice::post: mode=$REVIEW_MODE base=$BASE_REF diff_bytes=$(wc -c < "$diff_file") inline_candidates=$(jq 'length' <<<"$inline_candidates") valid=$(jq 'length' <<<"$valid_inline") demoted=$(jq 'length' <<<"$demoted") minors=$(jq 'length' <<<"$minors_from_budget")"
+
           # Demoted + budget minors both go into the final minors block.
           all_minors="$(jq -n --argjson d "$demoted" --argjson m "$minors_from_budget" '$d + $m')"
 
