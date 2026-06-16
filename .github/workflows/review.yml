@@ -1159,7 +1159,12 @@ jobs:
           set -euo pipefail
           owner="${GITHUB_REPOSITORY%/*}"
           repo="${GITHUB_REPOSITORY#*/}"
-          threads_out="$RUNNER_TEMP/threads.json"
+          # threads.json must live INSIDE the workspace so the skeptic agent can
+          # read it via the standard read permission (opencode's external_directory
+          # permission defaults to deny in non-interactive --run mode; $RUNNER_TEMP
+          # is outside $GITHUB_WORKSPACE and would be silently denied).
+          mkdir -p "$GITHUB_WORKSPACE/.ai-review-out"
+          threads_out="$GITHUB_WORKSPACE/.ai-review-out/threads.json"
           # Paginated cursor loop — do NOT use a single last:100.
           cursor=""
           all_nodes='[]'
@@ -1380,6 +1385,14 @@ jobs:
           # PR's working tree — this is the security point: a PR cannot weaken
           # drafter permissions by committing its own opencode config.
           # No GitHub tokens here; agents have no posting permissions.
+          #
+          # edit glob rationale: opencode's edit/write tools call
+          #   ctx.ask({ permission: "edit", patterns: [path.relative(worktree, filePath)] })
+          # so the pattern is always RELATIVE from the workspace root, e.g.
+          # ".ai-review-out/draft.json". The "**/" prefix requires ≥1 leading
+          # segment, so it would never match the bare ".ai-review-out/draft.json"
+          # case. We add both the relative form and the "**/" form (belt-and-braces
+          # for any future opencode version that passes absolute paths).
           OPENCODE_CONFIG_CONTENT: >-
             {
               "share": "disabled",
@@ -1392,7 +1405,7 @@ jobs:
                     "list": "allow",
                     "grep": "allow",
                     "bash": {"*": "deny", "git diff*": "allow", "git log*": "allow", "git show*": "allow", "git cat-file*": "allow"},
-                    "edit": {"*": "deny", "**/.ai-review-out/draft.json": "allow"},
+                    "edit": {"*": "deny", ".ai-review-out/draft.json": "allow", "**/.ai-review-out/draft.json": "allow"},
                     "webfetch": "deny",
                     "websearch": "deny"
                   }
@@ -1405,7 +1418,7 @@ jobs:
                     "list": "allow",
                     "grep": "allow",
                     "bash": "allow",
-                    "edit": {"*": "deny", "**/.ai-review-out/verified.json": "allow"},
+                    "edit": {"*": "deny", ".ai-review-out/verified.json": "allow", "**/.ai-review-out/verified.json": "allow"},
                     "webfetch": "deny",
                     "websearch": "deny"
                   }
@@ -1448,7 +1461,7 @@ jobs:
                     "list": "allow",
                     "grep": "allow",
                     "bash": {"*": "deny", "git diff*": "allow", "git log*": "allow", "git show*": "allow", "git cat-file*": "allow"},
-                    "edit": {"*": "deny", "**/.ai-review-out/draft.json": "allow"},
+                    "edit": {"*": "deny", ".ai-review-out/draft.json": "allow", "**/.ai-review-out/draft.json": "allow"},
                     "webfetch": "deny",
                     "websearch": "deny"
                   }
@@ -1493,7 +1506,7 @@ jobs:
                     "list": "allow",
                     "grep": "allow",
                     "bash": "allow",
-                    "edit": {"*": "deny", "**/.ai-review-out/verified.json": "allow"},
+                    "edit": {"*": "deny", ".ai-review-out/verified.json": "allow", "**/.ai-review-out/verified.json": "allow"},
                     "webfetch": "deny",
                     "websearch": "deny"
                   }
