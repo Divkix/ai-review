@@ -1604,9 +1604,16 @@ jobs:
             from_ref="$(git merge-base "origin/${BASE_REF}" HEAD 2>/dev/null || true)"
             [ -n "$from_ref" ] || from_ref="origin/${BASE_REF}"
           fi
-          # shellcheck disable=SC2086  # IGNORE_PATHSPECS intentionally word-splits
-          git diff "${from_ref}" HEAD ${IGNORE_PATHSPECS:+-- $IGNORE_PATHSPECS} > "$diff_file" || true
-          echo "::notice::post-git: base=$BASE_REF from_ref=${from_ref:0:12} range_commits=$(git rev-list --count "${from_ref}..HEAD" 2>/dev/null || echo ERR)"
+          # NOTE: do NOT append IGNORE_PATHSPECS here. It is formatted with
+          # literal single quotes for the LLM's own shell (`-- ':(exclude)…'`);
+          # the workflow's unquoted word-split would pass those quote characters
+          # to git as part of the pathspec, matching NO files and yielding an
+          # empty diff that demotes every inline comment. The anchor diff only
+          # needs to contain the changed files the comments target — the LLM has
+          # already scoped its comments away from ignored paths — so the full
+          # range diff is the correct, robust input for anchor validation.
+          git diff "${from_ref}" HEAD > "$diff_file" || true
+          echo "::notice::post-git: base=$BASE_REF from_ref=${from_ref:0:12} range_commits=$(git rev-list --count "${from_ref}..HEAD" 2>/dev/null || echo ERR) diff_bytes=$(wc -c < "$diff_file")"
 
           # --- 4. Validate anchors ---------------------------------------------
           anchor_result="$(post_validate_anchors "$diff_file" <<<"$inline_candidates")"
