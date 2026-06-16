@@ -124,7 +124,9 @@ All of these keys follow the same base-branch trust rule: they are read from the
 
 ## Versioning
 
-**Alpha.** Callers pin an exact release tag (currently `@v0.3.0`), not a floating major — the API is still changing. Tag releases of this repo; when cutting a new one, run `scripts/release.sh <tag>` (bumps every internal pin and re-verifies); locations it touches:
+**Alpha.** Callers pin an exact release tag (currently `@v0.4.0`), not a floating major — the API is still changing. Tag releases of this repo; when cutting a new one, run `scripts/release.sh <tag>` (bumps every internal pin and re-verifies); locations it touches:
+
+**Migration to v0.4.0**: bump your caller pin `@v0.3.0` → `@v0.4.0`. No `.ai-review.yml` changes are required. Well-known agent-rule files on the base branch (`AGENTS.md`, `CLAUDE.md`, `.cursorrules`, `.github/copilot-instructions.md`, `.windsurfrules`, `.cursor/rules/*.mdc`) are now auto-detected and injected as review guidelines — additive to any explicit `guidelines:` path and deduped by content. Opt out with `auto_guidelines: false`.
 
 **Migration to v0.3.0**: bump your caller pin `@v0.2.1` → `@v0.3.0`. No `.ai-review.yml` changes are required — the new `instructions:` and `guidelines:` keys are opt-in and `version:` stays `1`. Re-copy `templates/` if you want the new optional `verifier_model` / `verifier_variant` inputs (an optionally cheaper model for the verification pass). This release replaces the single-pass review with a two-pass **drafter → skeptic verifier** flow plus **deterministic posting** (review correctness no longer depends on the model following the playbook), expands static analysis from **3 → 12** auto-selected scanners, and adds **historical co-change** and **ast-grep symbol-aware** context alongside the per-path `instructions:` / `guidelines:` config.
 
