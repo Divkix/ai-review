@@ -266,7 +266,7 @@ jobs:
             [ -n "$cand_json" ] || continue
             cand_type="$(jq -r 'if type=="object" then (.type // "") else "array" end' <<< "$cand_json" 2>/dev/null || true)"
             cand_enc="$(jq -r 'if type=="object" then (.encoding // "") else "" end' <<< "$cand_json" 2>/dev/null || true)"
-            [ "$cand_type" = "file" ] && [ "$cand_enc" = "base64" ] || continue
+            if [ "$cand_type" != "file" ] || [ "$cand_enc" != "base64" ]; then continue; fi
             cand_body="$(jq -r '.content // ""' <<< "$cand_json" 2>/dev/null | base64 -d 2>/dev/null || true)"
             [ -n "$cand_body" ] || continue
             cand_tmp="$(mktemp /tmp/scope-guideline-src.XXXXXX)"
