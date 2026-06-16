@@ -1385,6 +1385,23 @@ jobs:
           fi
           echo "${API_KEY_ENV}=${LLM_API_KEY}" >> "$GITHUB_ENV"
 
+      # Defense-in-depth: a PR-committed opencode config is loaded by opencode
+      # from the checked-out PR head and, even though OPENCODE_CONFIG_CONTENT is
+      # a higher-priority layer, deep-merging it can break the locked-down agents
+      # (observed: the drafter ended up read-only and could not write its output,
+      # failing the review). Strip any PR-controlled opencode config from the
+      # workspace before running the agents — the diff still carries the file, so
+      # it is still reviewed; opencode just won't load it as configuration.
+      - name: Strip PR-controlled opencode config
+        run: |
+          set -euo pipefail
+          find "$GITHUB_WORKSPACE" -maxdepth 4 -type f \
+            \( -name 'opencode.json' -o -name 'opencode.jsonc' -o -name 'opencode.json5' \) \
+            -print -delete 2>/dev/null || true
+          find "$GITHUB_WORKSPACE" -maxdepth 4 -type d -name '.opencode' \
+            -print -exec rm -rf {} + 2>/dev/null || true
+          echo "Stripped any PR-committed opencode config from the workspace."
+
       - name: Run drafter
         env:
           MODEL: ${{ inputs.model }}
