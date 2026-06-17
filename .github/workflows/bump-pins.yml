@@ -6,9 +6,13 @@
 #
 # GitHub Action @sha pins are handled separately by .github/dependabot.yml.
 #
-# NOTE: PRs opened with the default GITHUB_TOKEN do NOT trigger other workflow
-# runs (GitHub anti-recursion). The in-job offline check + actionlint
-# pre-validate each bump; the full live `pins` CI runs on push after merge.
+# REQUIRES a repo secret `BUMP_PINS_TOKEN`: a classic PAT with `repo` + `workflow`
+# scopes. The pins live INSIDE .github/workflows/*.yml, and the default
+# GITHUB_TOKEN is categorically forbidden from pushing changes to workflow files
+# ("refusing to allow a GitHub App to create or update workflow ... without
+# workflows permission") — no `permissions:` key can grant it. The PAT also makes
+# the opened PRs trigger the normal `pins`/`ci` checks (unlike GITHUB_TOKEN, which
+# GitHub suppresses to avoid recursion).
 name: Bump pins
 
 on:
@@ -73,11 +77,24 @@ jobs:
       matrix:
         tool: ${{ fromJSON(needs.matrix.outputs.tools) }}
     steps:
+      - name: Require BUMP_PINS_TOKEN
+        env:
+          BUMP_PINS_TOKEN: ${{ secrets.BUMP_PINS_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${BUMP_PINS_TOKEN}" ]; then
+            echo "::error::missing secret BUMP_PINS_TOKEN (classic PAT with repo + workflow scopes). The default GITHUB_TOKEN cannot push pin edits to .github/workflows/*.yml." >&2
+            exit 1
+          fi
+
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           fetch-depth: 0
-          # Keep credentials so the branch push + gh pr create authenticate.
+          # PAT with `workflow` scope: the pins live in workflow files, which the
+          # default GITHUB_TOKEN is forbidden from pushing. Persisted so the
+          # branch push authenticates with it.
+          token: ${{ secrets.BUMP_PINS_TOKEN }}
           persist-credentials: true
 
       - name: Configure git identity
@@ -89,7 +106,7 @@ jobs:
       - name: Bump pin
         id: bump
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.BUMP_PINS_TOKEN }}
           TOOL: ${{ matrix.tool }}
         run: |
           set -euo pipefail
@@ -105,7 +122,7 @@ jobs:
       - name: Open pull request
         if: steps.bump.outputs.changed == 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.BUMP_PINS_TOKEN }}
           TOOL: ${{ matrix.tool }}
           BRANCH: ${{ steps.bump.outputs.branch }}
           TITLE: ${{ steps.bump.outputs.title }}
