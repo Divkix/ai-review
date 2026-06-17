@@ -1,0 +1,22 @@
+# Keeps the third-party GitHub Action `@sha # vX.Y.Z` pins current. Dependabot
+# updates the commit SHA and the trailing version comment together — the one
+# pin class Renovate/custom scripts don't need to touch. The pinned tool
+# BINARIES (version + sha256) are handled by .github/workflows/bump-pins.yml.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: chore
+    labels:
+      - dependencies
+    groups:
+      # One grouped PR for routine action bumps keeps the noise down; security
+      # updates still open on their own.
+      github-actions:
+        patterns:
+          - "*"
