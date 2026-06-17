@@ -130,7 +130,7 @@ All of these keys follow the same base-branch trust rule: they are read from the
 
 ## Versioning
 
-**Alpha.** Callers pin an exact release tag (currently `@v0.4.4`), not a floating major — the API is still changing. Cutting a release bumps every internal `ref:`/`@vX` pin to the new tag and tags the commit that carries them; the [`Release` workflow](.github/workflows/release.yml) automates this two ways:
+**Alpha.** Callers pin an exact release tag (currently `@v0.4.5`), not a floating major — the API is still changing. Cutting a release bumps every internal `ref:`/`@vX` pin to the new tag and tags the commit that carries them; the [`Release` workflow](.github/workflows/release.yml) automates this two ways:
 
 - **Automated (recommended):** **Actions → Release → Run workflow**, enter the tag (e.g. `v0.5.0`). It runs `scripts/release.sh`, commits the pin bump to `main`, and pushes the annotated tag. The tag push then runs the full check suite **plus a `pin == tag` guard** (`EXPECT_PIN_TAG`) and publishes a GitHub Release with auto-generated notes. Requires the `BUMP_PINS_TOKEN` secret (same PAT as the bumper, since the pins live in workflow files).
 - **Manual:** run `scripts/release.sh <tag>` locally (bumps every internal pin and re-verifies), commit, push, then `git tag -a <tag> && git push origin <tag>`. The same tag-push validation + Release-publish jobs run.
