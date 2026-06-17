@@ -348,22 +348,21 @@ jobs:
           PR: ${{ steps.resolve.outputs.pr }}
         run: |
           set -euo pipefail
-          gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
-            | jq -s 'add' > "$RUNNER_TEMP/comments.json"
-          # Only trust state markers authored by the github-actions bot itself;
-          # any user could otherwise plant a forged marker comment.
-          state_comment="$(jq -c '[.[]
-            | select(.user.type == "Bot" and (.user.login | startswith("github-actions")))
-            | select(.body | contains("<!-- ai-review:state"))] | last // empty' "$RUNNER_TEMP/comments.json")"
+          # shellcheck source=scripts/lib/reconcile.sh
+          . .ai-review-tooling/scripts/lib/reconcile.sh
+          # Decode the latest TRUSTED (bot-authored) state marker via the
+          # unit-tested lib helper — single source of truth for the parse and
+          # the bot-author trust filter. Returns the inner JSON or "{}".
+          raw="$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
+            | reconcile_state_from_comments)"
           state_json=""
           last_sha=""
-          if [ -n "$state_comment" ]; then
-            raw="$(jq -r '.body | capture("<!-- ai-review:state (?<j>.*?) -->"; "s") | .j // ""' <<<"$state_comment" || true)"
-            if [ -n "$raw" ] && state_json="$(jq -c . <<<"$raw" 2>/dev/null)"; then
-              last_sha="$(jq -r '.lastSha // ""' <<<"$state_json")"
-            else
-              state_json=""
-            fi
+          # Re-validate as compact JSON (rejects a malformed marker body) and
+          # normalize the "no marker" sentinel "{}" back to empty so the
+          # state_json output keeps its prior shape for first-time reviews.
+          if parsed="$(jq -ce . <<<"$raw" 2>/dev/null)" && [ "$parsed" != "{}" ]; then
+            state_json="$parsed"
+            last_sha="$(jq -r '.lastSha // ""' <<<"$state_json")"
           fi
           # Validate before writing to GITHUB_OUTPUT: a malformed value could
           # otherwise inject extra output lines or break downstream git/jq use.

@@ -8,9 +8,8 @@ r"""Static contract checks for ai-review (no network, no secrets).
    must be a superset of every permission the reusable workflow's jobs request
    (and the nested review.yml call inside commands.yml is checked too).
    Reusable workflows can only *downgrade*, so the caller must grant the max.
-3. Reconcile drift-guard: the canonical state-marker `capture(...)` regex used
-   by scripts/lib/reconcile.sh must still appear verbatim in the gate job's
-   inline parser, so the unit-tested lib can't silently diverge from the YAML.
+3. gh api flag-misuse guard: no workflow uses `gh api ... -o` (a curl-ism; gh
+   api has no such flag, so it would silently break the deterministic POST).
 
 Run from repo root: python3 scripts/check-contract.py
 Exit non-zero on any violation.
@@ -135,20 +134,7 @@ def check_permissions() -> None:
         assert_superset("caller-commands.yml", cc_perms[0], needed)
 
 
-# --- 3: reconcile drift-guard -----------------------------------------------
-CANON = 'capture("<!-- ai-review:state (?<j>.*?) -->"; "s")'
-
-
-def check_drift_guard() -> None:
-    lib = (ROOT / "scripts" / "lib" / "reconcile.sh").read_text()
-    if CANON not in lib:
-        err("reconcile.sh no longer contains the canonical state-marker capture regex")
-    gate = (WORKFLOWS / "review.yml").read_text()
-    if CANON not in gate:
-        err("review.yml gate inline parser diverged from reconcile.sh capture regex")
-
-
-# --- 4: gh api flag-misuse guard --------------------------------------------
+# --- 3: gh api flag-misuse guard --------------------------------------------
 # `gh api` has no -o/--output flag (that is a curl-ism); using it makes gh print
 # usage and exit non-zero, silently breaking the deterministic review POST.
 # Caught only at runtime (CI has no token), so guard it statically here.
@@ -165,7 +151,6 @@ def check_gh_api_flags() -> None:
 def main() -> int:
     check_prompt_contract()
     check_permissions()
-    check_drift_guard()
     check_gh_api_flags()
     if errors:
         print(f"contract check FAILED ({len(errors)} issue(s))", file=sys.stderr)

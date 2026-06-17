@@ -25,6 +25,76 @@ setup() {
   [ "$(echo "$output" | jq -c .)" = "{}" ]
 }
 
+# --- gate "Read state marker comment" run-block (composition smoke test) -----
+# Reproduces the review.yml gate step body, templating only the comments source
+# (gh api -> cat fixture) and the lib source path (env var). Asserts the
+# GITHUB_OUTPUT contract the gate emits.
+# The body is written to a temp script via a quoted heredoc so nothing expands
+# at write time, then run with env vars supplying the inputs.
+
+_run_gate_state_block() {
+  # $1 = comments json file; writes the gate's GITHUB_OUTPUT contract.
+  local script="$BATS_TEST_TMPDIR/gate_state.sh"
+  cat > "$script" <<'GATE'
+set -euo pipefail
+# shellcheck source=/dev/null
+. "$LIB"
+raw="$(cat "$COMMENTS" | reconcile_state_from_comments)"
+state_json=""
+last_sha=""
+if parsed="$(jq -ce . <<<"$raw" 2>/dev/null)" && [ "$parsed" != "{}" ]; then
+  state_json="$parsed"
+  last_sha="$(jq -r '.lastSha // ""' <<<"$state_json")"
+fi
+if ! grep -qE '^[0-9a-f]{40}$' <<<"$last_sha"; then
+  last_sha=""
+fi
+delim="STATE_EOF_$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+{
+  echo "last_sha=$last_sha"
+  echo "state_json<<$delim"
+  echo "$state_json"
+  echo "$delim"
+} >> "$GITHUB_OUTPUT"
+GATE
+  LIB="$REPO_ROOT/scripts/lib/reconcile.sh" COMMENTS="$1" GITHUB_OUTPUT="$GITHUB_OUTPUT" bash "$script"
+}
+
+@test "gate: state run-block emits state_json + 40-hex last_sha under set -euo pipefail" {
+  local sha="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"  # 40 hex
+  local comments="$BATS_TEST_TMPDIR/comments.json"
+  jq -n --arg sha "$sha" '[{user:{type:"Bot",login:"github-actions[bot]"},
+    body:("x <!-- ai-review:state {\"lastSha\":\"" + $sha + "\",\"findings\":[]} -->")}]' > "$comments"
+  export GITHUB_OUTPUT="$BATS_TEST_TMPDIR/out"; : > "$GITHUB_OUTPUT"
+  run _run_gate_state_block "$comments"
+  [ "$status" -eq 0 ]
+  grep -qx "last_sha=$sha" "$GITHUB_OUTPUT"
+  # extract the heredoc payload line (the line after the state_json<<DELIM
+  # opener); awk is portable across BSD/GNU, unlike sed's `{n;p}`.
+  payload="$(awk '/^state_json<<STATE_EOF_/{getline; print; exit}' "$GITHUB_OUTPUT")"
+  echo "$payload" | jq -e '.findings == []'
+  echo "$payload" | jq -e '.lastSha == "'"$sha"'"'
+}
+
+@test "gate: state run-block ignores forged non-bot marker -> empty outputs" {
+  export GITHUB_OUTPUT="$BATS_TEST_TMPDIR/out"; : > "$GITHUB_OUTPUT"
+  run _run_gate_state_block "$FIX/comments-none.json"
+  [ "$status" -eq 0 ]
+  grep -qx "last_sha=" "$GITHUB_OUTPUT"
+  payload="$(awk '/^state_json<<STATE_EOF_/{getline; print; exit}' "$GITHUB_OUTPUT")"
+  [ -z "$payload" ]
+}
+
+@test "gate: state run-block blanks non-40-hex last_sha but keeps state_json" {
+  export GITHUB_OUTPUT="$BATS_TEST_TMPDIR/out"; : > "$GITHUB_OUTPUT"
+  run _run_gate_state_block "$FIX/comments-open-finding.json"
+  [ "$status" -eq 0 ]
+  grep -qx "last_sha=" "$GITHUB_OUTPUT"
+  payload="$(awk '/^state_json<<STATE_EOF_/{getline; print; exit}' "$GITHUB_OUTPUT")"
+  [ -n "$payload" ]
+  echo "$payload" | jq -e '.lastSha == "cafe01"'
+}
+
 # --- reconcile_open_thread_ids ----------------------------------------------
 
 @test "open ids: empty findings -> no ids" {

@@ -20,7 +20,7 @@ Run all checks in one command: `make check` (lint, tests, contract, offline pin 
 Individual commands:
 - `actionlint .github/workflows/*.yml` — lint workflows (bundles shellcheck on every `run:` block).
 - `bats tests/` — unit-test the lib scripts (reconcile, sarif, context, scope).
-- `python3 scripts/check-contract.py` — verify prompt env vars, template permission supersets, and the gate↔lib regex drift-guard.
+- `python3 scripts/check-contract.py` — verify prompt env vars, template permission supersets, and gh-api flag usage.
 - `scripts/check-pins.sh` — assert all tool version/sha256 pins are in sync and match the live release assets; offline with `CHECK_PINS_OFFLINE=1`.
 - `shellcheck scripts/*.sh scripts/lib/*.sh` — lint shell.
 
