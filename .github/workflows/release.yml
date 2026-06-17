@@ -1,0 +1,200 @@
+# Release automation for this reusable-workflow repo. There is nothing to
+# *build* — the deliverable is the tagged source that callers pin via
+# `uses: divkix/ai-review/...@vX.Y.Z`. So a release is: (1) make every internal
+# `ref:`/`@vX` pin equal the new tag, (2) tag the exact commit that carries
+# those pins, (3) publish a GitHub Release with notes.
+#
+# DUAL TRIGGER:
+#   workflow_dispatch(tag) -> `prepare`: runs scripts/release.sh, commits the
+#     pin bump to main, then creates + pushes the annotated tag. The tag push
+#     then fires the two jobs below. Needs BUMP_PINS_TOKEN because release.sh
+#     edits .github/workflows/*.yml, which the default GITHUB_TOKEN may not push.
+#   push: tags 'v*' -> `validate` (make check + EXPECT_PIN_TAG pin==tag guard)
+#     then `publish` (GitHub Release with auto-generated notes). This path also
+#     covers a tag pushed by hand (scripts/release.sh + git tag locally).
+#
+# NOTE: per AGENTS.md the e2e sandbox acceptance pass is still manual — this
+# workflow does not announce or run live-PR validation.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to cut (e.g. v0.5.0); bumps internal pins, commits to main, pushes the tag"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # workflow_dispatch only: bump pins on main and push the tag. The tag push
+  # re-enters this workflow through the `push: tags` trigger for validate+publish.
+  prepare:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Require BUMP_PINS_TOKEN
+        env:
+          BUMP_PINS_TOKEN: ${{ secrets.BUMP_PINS_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${BUMP_PINS_TOKEN}" ]; then
+            echo "::error::missing secret BUMP_PINS_TOKEN (classic PAT with repo + workflow scopes). release.sh edits .github/workflows/*.yml, which the default GITHUB_TOKEN cannot push." >&2
+            exit 1
+          fi
+
+      - name: Validate tag format
+        env:
+          TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "::error::tag '$TAG' must be vMAJOR.MINOR.PATCH[-prerelease]" >&2
+            exit 1
+          fi
+
+      - name: Checkout main
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: main
+          fetch-depth: 0
+          # PAT: the pin bump touches workflow files, which GITHUB_TOKEN can't push.
+          token: ${{ secrets.BUMP_PINS_TOKEN }}
+          persist-credentials: true
+
+      - name: Install actionlint (pinned)
+        run: |
+          set -euo pipefail
+          VER="1.7.12"
+          SHA="8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
+          curl -fsSL -o /tmp/actionlint.tar.gz \
+            "https://github.com/rhysd/actionlint/releases/download/v${VER}/actionlint_${VER}_linux_amd64.tar.gz"
+          echo "${SHA}  /tmp/actionlint.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/actionlint.tar.gz -C /usr/local/bin actionlint
+          actionlint --version
+
+      - name: Configure git identity
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Bump internal pins to the tag
+        id: bump
+        env:
+          TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -euo pipefail
+          # Refuse if the tag already exists (locally or on origin).
+          if git rev-parse "$TAG" >/dev/null 2>&1 || git ls-remote --exit-code --tags origin "$TAG" >/dev/null 2>&1; then
+            echo "::error::tag $TAG already exists — pick a new version" >&2
+            exit 1
+          fi
+          # release.sh refuses a dirty tree / no-op and re-runs check-pins + actionlint.
+          bash scripts/release.sh "$TAG"
+          if [ -n "$(git status --porcelain)" ]; then
+            git commit -am "chore: pin internal refs to exact ${TAG}"
+            git push origin main
+          else
+            echo "No pin changes (already at ${TAG}); proceeding to tag."
+          fi
+
+      - name: Create and push the tag
+        env:
+          TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -euo pipefail
+          # Tag the commit that now carries the bumped pins.
+          git tag -a "$TAG" -m "Release $TAG"
+          git push origin "$TAG"
+
+  # tag push (from `prepare` above OR a manual local tag): the safety gate.
+  validate:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Install actionlint (pinned)
+        run: |
+          set -euo pipefail
+          VER="1.7.12"
+          SHA="8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
+          curl -fsSL -o /tmp/actionlint.tar.gz \
+            "https://github.com/rhysd/actionlint/releases/download/v${VER}/actionlint_${VER}_linux_amd64.tar.gz"
+          echo "${SHA}  /tmp/actionlint.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/actionlint.tar.gz -C /usr/local/bin actionlint
+          actionlint --version
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Install test deps
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet pyyaml
+          sudo apt-get update -qq && sudo apt-get install -y -qq bats jq ripgrep
+
+      - name: Lint + unit + contract
+        run: |
+          set -euo pipefail
+          actionlint .github/workflows/*.yml
+          shellcheck scripts/*.sh scripts/lib/*.sh
+          bats tests/
+          python3 scripts/check-contract.py
+
+      - name: Pin consistency + pin==tag guard (live sha256)
+        env:
+          EXPECT_PIN_TAG: ${{ github.ref_name }}
+        run: bash scripts/check-pins.sh
+
+  publish:
+    if: github.event_name == 'push'
+    needs: [validate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # Idempotent: skip if a release for this tag already exists.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists — skipping."
+            exit 0
+          fi
+          # Mark vX.Y.Z-<suffix> as a prerelease.
+          prerelease=""
+          [[ "$TAG" == *-* ]] && prerelease="--prerelease"
+          # shellcheck disable=SC2086  # $prerelease is an intentional optional flag
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --generate-notes \
+            --verify-tag \
+            $prerelease
