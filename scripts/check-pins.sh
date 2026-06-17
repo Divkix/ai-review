@@ -11,7 +11,9 @@
 #       one distinct SHA256 in review.yml; OPENGREP_RULES_REF is a 40-char hex
 #       commit. Live mode verifies all 14 asset hashes.
 #   4. Every internal version pin (`ref: vN`, `@vN`) shares one major N, so a
-#       half-finished release bump can't ship.
+#       half-finished release bump can't ship. When EXPECT_PIN_TAG is set (the
+#       release workflow sets it to the pushed tag), the single pin must also
+#       EQUAL that tag — catches "tagged vX but pins still point at vX-1".
 #
 # Run from the repo root: scripts/check-pins.sh
 set -euo pipefail
@@ -154,6 +156,12 @@ elif [ "${#pins[@]}" -ne 1 ]; then
   err "mixed internal version pins (half-finished release bump?): ${pins[*]}"
 else
   echo "internal pin: ${pins[0]}"
+  # Release gate: when cutting a tag, assert the single internal pin equals the
+  # tag being released — catches "tagged vX but pins still say vX-1", which the
+  # self-consistency check above cannot see. Opt-in via EXPECT_PIN_TAG.
+  if [ -n "${EXPECT_PIN_TAG:-}" ] && [ "${pins[0]}" != "$EXPECT_PIN_TAG" ]; then
+    err "internal pin (${pins[0]}) != release tag ($EXPECT_PIN_TAG) — run scripts/release.sh $EXPECT_PIN_TAG"
+  fi
 fi
 
 if [ "$fail" -ne 0 ]; then
