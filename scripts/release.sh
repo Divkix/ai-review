@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Pin bumper for release preparation. Edits every internal ref:/uses:@<tag> pin
-# to the new tag and verifies the result. Does NOT commit, tag, or push.
+# AND the README "currently @<tag>" caller-pin pointer to the new tag, then
+# verifies the result. Does NOT commit, tag, or push.
 #
 # Usage: scripts/release.sh <new-tag>
 #   e.g. scripts/release.sh v0.0.4
@@ -64,6 +65,17 @@ for f in "${pin_files[@]}"; do
     "$f"
   rm -f "${f}.bak"
 done
+
+# --- update README "currently @<tag>" caller-pin pointer (anchored) ----------
+# Replace ONLY the unique 'currently `@vX`' token — NOT the historical @vX in
+# migration notes (those use a different phrasing, e.g. "bump your caller pin
+# `@v0.3.0` → `@v0.4.0`"), so a global pin replace would corrupt them.
+sed -i.bak -E "s|(currently \`@)v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?\`|\1${new_tag}\`|" README.md
+rm -f README.md.bak
+if ! grep -qF "currently \`@${new_tag}\`" README.md; then
+  echo "error: README caller-pin pointer not updated to ${new_tag} (the 'currently \`@vX\`' anchor moved or changed)" >&2
+  exit 1
+fi
 
 # --- verify ------------------------------------------------------------------
 echo ""
