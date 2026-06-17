@@ -857,6 +857,300 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# post_fold_inline_to_minors
+# ---------------------------------------------------------------------------
+
+@test "fold_inline_to_minors: inline folded into minors (inline-then-minors order), inline emptied" {
+  run post_fold_inline_to_minors <<'EOF'
+{
+  "walkthrough": "LGTM",
+  "inline": [{"path":"a.py","line":1,"side":"RIGHT","body":"I1"}],
+  "minors": [{"path":"m.py","line":2,"body":"M1"}],
+  "dropped_static": [],
+  "rejected": []
+}
+EOF
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.inline == []'
+  echo "$output" | jq -e '.minors | length == 2'
+  # inline entry comes first
+  echo "$output" | jq -e '.minors[0].body == "I1"'
+  echo "$output" | jq -e '.minors[1].body == "M1"'
+  echo "$output" | jq -e '.walkthrough == "LGTM"'
+}
+
+@test "fold_inline_to_minors: empty inline -> minors unchanged" {
+  run post_fold_inline_to_minors <<'EOF'
+{
+  "walkthrough": "ok",
+  "inline": [],
+  "minors": [{"path":"m.py","line":2,"body":"M1"}],
+  "dropped_static": [{"tool":"opengrep","rule_id":"R1","path":"x.py","reason":"fp"}],
+  "rejected": []
+}
+EOF
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.inline == []'
+  echo "$output" | jq -e '.minors | length == 1'
+  echo "$output" | jq -e '.minors[0].body == "M1"'
+  # dropped_static preserved
+  echo "$output" | jq -e '.dropped_static | length == 1'
+}
+
+# ---------------------------------------------------------------------------
+# post_prepend_approval_notice
+# ---------------------------------------------------------------------------
+
+@test "prepend_approval_notice: prepends notice to .body" {
+  run post_prepend_approval_notice <<'EOF'
+{"event":"COMMENT","body":"## Summary\nAll good.","comments":[]}
+EOF
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.body | startswith("**Verdict: APPROVE** — posted as a comment because this repository does not allow GitHub Actions to approve pull requests.")'
+  # Original body preserved after the notice (with blank line separator)
+  echo "$output" | jq -e '.body | contains("## Summary\nAll good.")'
+}
+
+@test "prepend_approval_notice: preserves event and comments" {
+  run post_prepend_approval_notice <<'EOF'
+{"event":"COMMENT","body":"orig","comments":[{"path":"a.py","line":1,"side":"RIGHT","body":"c"}]}
+EOF
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.event == "COMMENT"'
+  echo "$output" | jq -e '.comments | length == 1'
+  echo "$output" | jq -e '.comments[0].path == "a.py"'
+}
+
+@test "prepend_approval_notice: empty body -> no dangling trailing newlines (byte-exact parity with workflow \$()-capture)" {
+  # Regression guard: the original rung-3 logic captured the body via
+  # orig_body="$(jq -r '.body' …)", and $() strips trailing newlines. With an
+  # empty body the result must be EXACTLY the notice (no trailing "\n\n").
+  run post_prepend_approval_notice <<'EOF'
+{"event":"COMMENT","body":"","comments":[]}
+EOF
+  [ "$status" -eq 0 ]
+  expected="**Verdict: APPROVE** — posted as a comment because this repository does not allow GitHub Actions to approve pull requests."
+  [ "$(echo "$output" | jq -r '.body')" = "$expected" ]
+}
+
+@test "prepend_approval_notice: trailing newlines in body stripped (byte-exact parity)" {
+  # Body ending in newlines: $()-capture would strip them; the helper must too.
+  run post_prepend_approval_notice <<'EOF'
+{"event":"COMMENT","body":"line one\n\n","comments":[]}
+EOF
+  [ "$status" -eq 0 ]
+  expected="**Verdict: APPROVE** — posted as a comment because this repository does not allow GitHub Actions to approve pull requests.\n\nline one"
+  # Compare the literal escaped form (jq -c renders \n as backslash-n)
+  [ "$(echo "$output" | jq -c '.body')" = "\"$expected\"" ]
+}
+
+# ---------------------------------------------------------------------------
+# post_build_state_findings
+# ---------------------------------------------------------------------------
+
+@test "build_state_findings: APPROVE -> empty array" {
+  run post_build_state_findings "APPROVE" <<'EOF'
+{
+  "prior": [{"threadId":"PRRT_1","path":"a.py","fingerprint":"fp1","severity":"blocker","status":"unfixed"}],
+  "inline": [{"path":"b.py","body":"x","fingerprint":"fp2","severity":"major"}],
+  "matched": [{"path":"b.py","body":"x","threadId":"PRRT_2"}]
+}
+EOF
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '. == []'
+}
+
+@test "build_state_findings: REQUEST_CHANGES merges prior_unfixed + posted" {
+  run post_build_state_findings "REQUEST_CHANGES" <<'EOF'
+{
+  "prior": [
+    {"threadId":"PRRT_old","path":"x.py","fingerprint":"fpx","severity":"blocker","status":"unfixed"},
+    {"threadId":"PRRT_fixed","path":"y.py","fingerprint":"fpy","severity":"major","status":"fixed"}
+  ],
+  "inline": [{"path":"b.py","body":"new finding","fingerprint":"fp2","severity":"blocker"}],
+  "matched": [{"path":"b.py","body":"new finding","threadId":"PRRT_new"}]
+}
+EOF
+  [ "$status" -eq 0 ]
+  # prior_unfixed (1) + posted (1), fixed prior excluded
+  echo "$output" | jq -e 'length == 2'
+  echo "$output" | jq -e '.[0].threadId == "PRRT_old"'
+  echo "$output" | jq -e '.[0].file == "x.py"'
+  echo "$output" | jq -e '.[1].threadId == "PRRT_new"'
+  echo "$output" | jq -e '.[1].file == "b.py"'
+  # key order mirrors post_compose_state
+  echo "$output" | jq -e '.[0] | keys_unsorted == ["threadId","file","fingerprint","severity"]'
+}
+
+@test "build_state_findings: posted matched -> threadId carried" {
+  run post_build_state_findings "REQUEST_CHANGES" <<'EOF'
+{
+  "prior": [],
+  "inline": [{"path":"b.py","body":"x","fingerprint":"fp2","severity":"major"}],
+  "matched": [{"path":"b.py","body":"x","threadId":"PRRT_match"}]
+}
+EOF
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e 'length == 1'
+  echo "$output" | jq -e '.[0].threadId == "PRRT_match"'
+  echo "$output" | jq -e '.[0].fingerprint == "fp2"'
+  echo "$output" | jq -e '.[0].severity == "major"'
+}
+
+@test "build_state_findings: posted unmatched -> threadId null" {
+  run post_build_state_findings "REQUEST_CHANGES" <<'EOF'
+{
+  "prior": [],
+  "inline": [{"path":"b.py","body":"x","fingerprint":"fp2","severity":"major"}],
+  "matched": [{"path":"other.py","body":"different","threadId":"PRRT_x"}]
+}
+EOF
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e 'length == 1'
+  echo "$output" | jq -e '.[0].threadId == null'
+  echo "$output" | jq -e '.[0].file == "b.py"'
+}
+
+@test "build_state_findings: prior status=fixed excluded" {
+  run post_build_state_findings "REQUEST_CHANGES" <<'EOF'
+{
+  "prior": [{"threadId":"PRRT_f","path":"y.py","fingerprint":"fpy","severity":"blocker","status":"fixed"}],
+  "inline": [],
+  "matched": []
+}
+EOF
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '. == []'
+}
+
+@test "build_state_findings: empty inline+prior -> empty array" {
+  run post_build_state_findings "REQUEST_CHANGES" <<'EOF'
+{"prior":[],"inline":[],"matched":[]}
+EOF
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '. == []'
+}
+
+# ---------------------------------------------------------------------------
+# post_summarize
+# ---------------------------------------------------------------------------
+
+@test "summarize: full with findings -> blocking/major/minor string" {
+  run post_summarize "full" <<'EOF'
+{
+  "findings": [
+    {"severity":"blocker","confidence":"high"},
+    {"severity":"major","confidence":"medium"}
+  ],
+  "prior": [],
+  "minors_count": 3,
+  "new_count": 0
+}
+EOF
+  [ "$status" -eq 0 ]
+  [ "$output" = "1 blocking, 1 major, 3 minor/nit findings." ]
+}
+
+@test "summarize: full all-zero -> No findings." {
+  run post_summarize "full" <<'EOF'
+{"findings":[],"prior":[],"minors_count":0,"new_count":0}
+EOF
+  [ "$status" -eq 0 ]
+  [ "$output" = "No findings." ]
+}
+
+@test "summarize: full counts only high/medium-confidence blockers/majors" {
+  run post_summarize "full" <<'EOF'
+{
+  "findings": [
+    {"severity":"blocker","confidence":"high"},
+    {"severity":"blocker","confidence":"low"},
+    {"severity":"major","confidence":"medium"},
+    {"severity":"major","confidence":"low"},
+    {"severity":"minor","confidence":"high"}
+  ],
+  "prior": [],
+  "minors_count": 0,
+  "new_count": 0
+}
+EOF
+  [ "$status" -eq 0 ]
+  # low-confidence blocker/major excluded; minor not counted in blocking/major
+  [ "$output" = "1 blocking, 1 major, 0 minor/nit findings." ]
+}
+
+@test "summarize: incremental -> Resolved/remaining/new string" {
+  run post_summarize "incremental" <<'EOF'
+{
+  "findings": [],
+  "prior": [
+    {"status":"fixed"},
+    {"status":"unfixed"},
+    {"status":"unfixed"}
+  ],
+  "minors_count": 0,
+  "new_count": 5
+}
+EOF
+  [ "$status" -eq 0 ]
+  [ "$output" = "Resolved 1, remaining 2, new 5." ]
+}
+
+# ---------------------------------------------------------------------------
+# post_compose_status_body
+# ---------------------------------------------------------------------------
+
+@test "compose_status_body: full -> single-commit link, ack marker, no warnings" {
+  run post_compose_status_body <<'EOF'
+{
+  "mode": "full",
+  "last_sha": "",
+  "head_sha": "deadbeef1234567890",
+  "repo_url": "https://github.com/o/r",
+  "event_used": "REQUEST_CHANGES",
+  "trigger_desc": "push by @x",
+  "size_warning": "",
+  "config_warning": "",
+  "summary": "1 blocking, 0 major, 0 minor/nit findings.",
+  "state_marker": "<!-- ai-review:state {\"lastSha\":\"deadbeef\",\"findings\":[]} -->"
+}
+EOF
+  [ "$status" -eq 0 ]
+  # ack marker leads the body
+  [[ "$output" == '<!-- ai-review:ack -->'* ]]
+  # single-commit link (full mode)
+  echo "$output" | grep -qF '[`deadbee`](https://github.com/o/r/commit/deadbeef1234567890)'
+  echo "$output" | grep -qF '**REQUEST_CHANGES**'
+  echo "$output" | grep -qF '1 blocking, 0 major, 0 minor/nit findings.'
+  # state marker is the tail
+  [[ "$output" == *'<!-- ai-review:state {"lastSha":"deadbeef","findings":[]} -->' ]]
+}
+
+@test "compose_status_body: incremental -> compare link with both warnings appended" {
+  run post_compose_status_body <<'EOF'
+{
+  "mode": "incremental",
+  "last_sha": "0123456789abcdef",
+  "head_sha": "fedcba9876543210",
+  "repo_url": "https://github.com/o/r",
+  "event_used": "APPROVE",
+  "trigger_desc": "/review by @y",
+  "size_warning": "WARN_SIZE",
+  "config_warning": "WARN_CONFIG",
+  "summary": "Resolved 1, remaining 0, new 0.",
+  "state_marker": "<!-- ai-review:state {\"lastSha\":\"x\",\"findings\":[]} -->"
+}
+EOF
+  [ "$status" -eq 0 ]
+  # compare link (incremental + last_sha)
+  echo "$output" | grep -qF '[`0123456`…`fedcba9`](https://github.com/o/r/compare/0123456789abcdef...fedcba9876543210)'
+  echo "$output" | grep -qF '**APPROVE**'
+  # both warnings present between summary and state marker
+  echo "$output" | grep -qF 'WARN_SIZE'
+  echo "$output" | grep -qF 'WARN_CONFIG'
+}
+
+# ---------------------------------------------------------------------------
 # I2: malformed stdin failure-mode tests
 # Each stdin-consuming function must exit non-zero on non-JSON input.
 # ---------------------------------------------------------------------------
@@ -891,6 +1185,31 @@ EOF
 
 @test "post: compose_state malformed stdin -> non-zero exit" {
   run bash -c 'source "$1/scripts/lib/post.sh"; post_compose_state abc123 <<<"not json"' _ "$REPO_ROOT"
+  [ "$status" -ne 0 ]
+}
+
+@test "post: fold_inline_to_minors malformed stdin -> non-zero exit" {
+  run bash -c 'source "$1/scripts/lib/post.sh"; post_fold_inline_to_minors <<<"not json"' _ "$REPO_ROOT"
+  [ "$status" -ne 0 ]
+}
+
+@test "post: prepend_approval_notice malformed stdin -> non-zero exit" {
+  run bash -c 'source "$1/scripts/lib/post.sh"; post_prepend_approval_notice <<<"not json"' _ "$REPO_ROOT"
+  [ "$status" -ne 0 ]
+}
+
+@test "post: build_state_findings malformed stdin -> non-zero exit" {
+  run bash -c 'source "$1/scripts/lib/post.sh"; post_build_state_findings REQUEST_CHANGES <<<"not json"' _ "$REPO_ROOT"
+  [ "$status" -ne 0 ]
+}
+
+@test "post: summarize malformed stdin -> non-zero exit" {
+  run bash -c 'source "$1/scripts/lib/post.sh"; post_summarize full <<<"not json"' _ "$REPO_ROOT"
+  [ "$status" -ne 0 ]
+}
+
+@test "post: compose_status_body malformed stdin -> non-zero exit" {
+  run bash -c 'source "$1/scripts/lib/post.sh"; post_compose_status_body <<<"not json"' _ "$REPO_ROOT"
   [ "$status" -ne 0 ]
 }
 
@@ -1094,21 +1413,17 @@ DIFF
   # threadId null since no threads exist yet
   jq -e '.[0].threadId == null' <<<"$matched"
 
-  # Build state findings: the posted blocker with null threadId
-  posted_findings="$(jq -n \
+  # Build state findings via post_build_state_findings (sub-block 9 helper):
+  # the posted blocker with null threadId. intended_verdict==REQUEST_CHANGES.
+  state_findings_input="$(jq -n \
+    --argjson prior '[]' \
     --argjson inline "$valid_inline" \
     --argjson matched "$matched" \
-    '[range($inline | length) as $i |
-      ($inline[$i]) as $f |
-      ($matched | map(select(.path == $f.path and .body == $f.body)) | first // {"threadId": null}) as $m |
-      {
-        threadId: $m.threadId,
-        file: $f.path,
-        fingerprint: ($f.fingerprint // null),
-        severity: ($f.severity // null)
-      }]')"
+    '{"prior":$prior,"inline":$inline,"matched":$matched}')"
+  posted_findings="$(post_build_state_findings "REQUEST_CHANGES" <<<"$state_findings_input")"
   jq -e 'length == 1' <<<"$posted_findings"
   jq -e '.[0].severity == "blocker"' <<<"$posted_findings"
+  jq -e '.[0].threadId == null' <<<"$posted_findings"
 
   # Step 7: compose state marker
   state_marker="$(post_compose_state "deadbeef1234567890abcdef1234567890abcdef" <<<"$posted_findings")"
@@ -1118,10 +1433,79 @@ DIFF
   echo "$state_marker" | grep -o '{.*}' | jq -e '.findings | length == 1'
   echo "$state_marker" | grep -o '{.*}' | jq -e '.findings[0].severity == "blocker"'
 
-  # Step 8: round-trip — reconcile reads the state back
-  comments_json="$(jq -n --arg body "$state_marker" \
+  # Step 7b: summary (sub-block 10 helper post_summarize) — full mode, 1 blocker
+  # high-confidence inline + 1 minor -> "1 blocking, 0 major, 1 minor/nit findings."
+  summary_input="$(jq -n \
+    --argjson findings "$(jq -c '.findings' "$BATS_TEST_TMPDIR/verified-fp.json")" \
+    --argjson prior "$(jq -c '.prior' "$BATS_TEST_TMPDIR/verified-fp.json")" \
+    --argjson minors_count "$(jq 'length' <<<"$all_minors")" \
+    --argjson new_count "$(jq 'length' <<<"$valid_inline")" \
+    '{"findings":$findings,"prior":$prior,"minors_count":$minors_count,"new_count":$new_count}')"
+  summary="$(post_summarize "full" <<<"$summary_input")"
+  [ "$summary" = "1 blocking, 0 major, 1 minor/nit findings." ]
+
+  # Step 7c: status body (sub-block 10 helper post_compose_status_body)
+  status_body_input="$(jq -n \
+    --arg mode "full" \
+    --arg last_sha "" \
+    --arg head_sha "deadbeef1234567890abcdef1234567890abcdef" \
+    --arg repo_url "https://github.com/o/r" \
+    --arg event_used "REQUEST_CHANGES" \
+    --arg trigger_desc "push" \
+    --arg size_warning "" \
+    --arg config_warning "" \
+    --arg summary "$summary" \
+    --arg state_marker "$state_marker" \
+    '{"mode":$mode,"last_sha":$last_sha,"head_sha":$head_sha,"repo_url":$repo_url,"event_used":$event_used,"trigger_desc":$trigger_desc,"size_warning":$size_warning,"config_warning":$config_warning,"summary":$summary,"state_marker":$state_marker}')"
+  status_body="$(post_compose_status_body <<<"$status_body_input")"
+  [[ "$status_body" == '<!-- ai-review:ack -->'* ]]
+  [[ "$status_body" == *"$state_marker" ]]
+  printf '%s' "$status_body" | grep -qF '**REQUEST_CHANGES**'
+
+  # Step 8: round-trip — reconcile reads the state back (from the composed body)
+  comments_json="$(jq -n --arg body "$status_body" \
     '[{"user":{"type":"Bot","login":"github-actions[bot]"},"body":$body}]')"
   recovered="$(echo "$comments_json" | reconcile_state_from_comments)"
   echo "$recovered" | jq -e '.lastSha == "deadbeef1234567890abcdef1234567890abcdef"'
   echo "$recovered" | jq -e '.findings | length == 1'
+}
+
+# ---------------------------------------------------------------------------
+# Composition smoke test: the rung-2 / rung-3 fallback payload chain under
+# set -euo pipefail. Mirrors review.yml's ladder payload construction (the
+# network if/else stays in YAML; only the pure transforms run here):
+#   rung 2: post_fold_inline_to_minors | post_compose_review "$verdict"
+#   rung 3: post_compose_review "COMMENT" | post_prepend_approval_notice
+# Guards the new compose|prepend pipe against pipefail/SIGPIPE regressions.
+# ---------------------------------------------------------------------------
+
+@test "pipeline: rung-2/rung-3 fallback payload chain smoke test (no network)" {
+  set -euo pipefail
+
+  # compose_input as built in sub-block 6: 1 inline blocker + 1 minor.
+  compose_input="$(jq -n '{
+    "walkthrough": "## Summary\nFindings present.",
+    "inline": [{"path":"a.py","line":2,"side":"RIGHT","body":"blocking issue","severity":"blocker","confidence":"high"}],
+    "minors": [{"path":"m.py","line":9,"body":"nit: rename"}],
+    "dropped_static": [],
+    "rejected": []
+  }')"
+
+  # Rung 2: fold inline into minors (inline-first), then compose with verdict.
+  degrade_input="$(post_fold_inline_to_minors <<<"$compose_input")"
+  jq -e '.inline == []' <<<"$degrade_input"
+  jq -e '.minors | length == 2' <<<"$degrade_input"
+  jq -e '.minors[0].body == "blocking issue"' <<<"$degrade_input"
+  rung2="$(post_compose_review "REQUEST_CHANGES" <<<"$degrade_input")"
+  jq -e '.event == "REQUEST_CHANGES"' <<<"$rung2"
+  # Inline folded into minors -> no inline review comments posted.
+  jq -e '.comments == []' <<<"$rung2"
+  jq -e '.body | contains("Minor suggestions")' <<<"$rung2"
+
+  # Rung 3: COMMENT event, then prepend the approval notice (the new pipe).
+  rung3="$(post_compose_review "COMMENT" <<<"$degrade_input" | post_prepend_approval_notice)"
+  jq -e '.event == "COMMENT"' <<<"$rung3"
+  jq -e '.body | startswith("**Verdict: APPROVE** — posted as a comment because")' <<<"$rung3"
+  # Original walkthrough survives after the notice.
+  jq -e '.body | contains("## Summary")' <<<"$rung3"
 }
