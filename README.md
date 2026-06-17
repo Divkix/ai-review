@@ -82,6 +82,8 @@ Open a pull request against the branch your caller workflow watches. Within a mi
 
 You don't have to track tool releases by hand. A weekly workflow (`.github/workflows/bump-pins.yml`, also runnable on demand via **Actions → Bump pins → Run workflow**) watches every pinned tool — the 12 scanners, opencode, ripgrep, ast-grep, and the `OPENGREP_RULES_REF` community-rules commit — and opens **one PR per tool** when a newer version exists. Each PR updates the version **and** the sha256 together (the hash is recomputed from the downloaded asset), so it passes `check-pins.sh` by construction. Nothing auto-merges; you review and merge. Third-party GitHub Action `@sha` pins are kept current separately by `.github/dependabot.yml`. The tool roster + download URLs live in one place — `scripts/lib/pins.sh` — shared by the checker and the bumper.
 
+> **Setup:** the bumper needs a repo secret **`BUMP_PINS_TOKEN`** — a [classic PAT](https://github.com/settings/tokens) with `repo` + `workflow` scopes. The pins live inside `.github/workflows/*.yml`, and the default `GITHUB_TOKEN` is categorically forbidden from pushing changes to workflow files, so an elevated token is required. The PAT also lets the opened PRs run the normal `pins`/`ci` checks.
+
 ## Per-repo configuration
 
 Place a `.ai-review.yml` file at the root of the **base branch** to tune scope and size limits:
