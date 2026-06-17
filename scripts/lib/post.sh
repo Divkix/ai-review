@@ -495,3 +495,183 @@ post_compose_state() {
     }' <<<"$findings")" || return 1
   awk '{printf "<!-- ai-review:state %s -->\n", $0}' <<<"$state_json"
 }
+
+# ---------------------------------------------------------------------------
+# post_fold_inline_to_minors
+# ---------------------------------------------------------------------------
+# Fold a compose payload's inline comments into its minors block (rung-2
+# anchor-class degrade). Inline comments are prepended to minors (inline first)
+# and .inline is emptied. Optional arrays default to [].
+#
+# Stdin: {"walkthrough":..., "inline":[...], "minors":[...],
+#         "dropped_static":[...], "rejected":[...]}
+# Stdout: same shape with inline:[] and minors:(inline ++ minors)
+#
+# Usage: post_fold_inline_to_minors < compose_input.json
+post_fold_inline_to_minors() {
+  local input
+  input="$(cat)"
+  jq -e . <<<"$input" >/dev/null || return 1
+  jq -c '{
+    walkthrough,
+    inline: [],
+    minors: ((.inline // []) + (.minors // [])),
+    dropped_static: (.dropped_static // []),
+    rejected: (.rejected // [])
+  }' <<<"$input"
+}
+
+# ---------------------------------------------------------------------------
+# post_prepend_approval_notice
+# ---------------------------------------------------------------------------
+# Prepend the "posted as a comment because…" notice to a review payload's body
+# (rung-3 permission-class degrade). Event and comments are preserved.
+# Trailing newlines on the result are stripped to match the original workflow's
+# `$()`-capture semantics byte-for-byte (an empty body must NOT leave the
+# prefix's "\n\n" dangling).
+#
+# Stdin: {"event":..., "body":..., "comments":[...]}
+# Stdout: same object with the notice prepended to .body
+#
+# Usage: post_prepend_approval_notice < review.json
+post_prepend_approval_notice() {
+  local input
+  input="$(cat)"
+  jq -e . <<<"$input" >/dev/null || return 1
+  jq -c '.body = (("**Verdict: APPROVE** — posted as a comment because this repository does not allow GitHub Actions to approve pull requests.\n\n" + .body) | sub("\n+$"; ""))' <<<"$input"
+}
+
+# ---------------------------------------------------------------------------
+# post_build_state_findings
+# ---------------------------------------------------------------------------
+# Build the open-findings array carried in the state marker.
+# Args: <intended_verdict>  (the DERIVED verdict, not event_used)
+# Stdin: {"prior":[...], "inline":[...], "matched":[...]}
+# Stdout: JSON array of {threadId,file,fingerprint,severity}
+#
+# Rule: intended_verdict=="APPROVE" -> [] (nothing open).
+# Otherwise: prior entries with status=="unfixed" (projected to
+# threadId/file/fingerprint/severity), followed by each posted inline finding
+# joined to its matched threadId by exact path+body (null when unmatched).
+# Emits the same field NAMES post_compose_state reads; compose_state re-projects
+# by name, so the key order here is cosmetic, not load-bearing for the round-trip.
+#
+# Usage: post_build_state_findings <intended_verdict> < input.json
+post_build_state_findings() {
+  local verdict="$1"
+  local input
+  input="$(cat)"
+  jq -e . <<<"$input" >/dev/null || return 1
+  if [ "$verdict" = "APPROVE" ]; then
+    printf '[]\n'
+    return 0
+  fi
+  jq -c '
+    ([ .prior[]? | select(.status == "unfixed")
+       | {threadId, file: .path, fingerprint: (.fingerprint // null), severity: (.severity // null)} ]) as $prior_unfixed |
+    ([ range(.inline | length) as $i | (.inline[$i]) as $f |
+       ((.matched | map(select(.path == $f.path and .body == $f.body)) | first) // {"threadId": null}) as $m |
+       {threadId: $m.threadId, file: $f.path, fingerprint: ($f.fingerprint // null), severity: ($f.severity // null)} ]) as $posted |
+    $prior_unfixed + $posted
+  ' <<<"$input"
+}
+
+# ---------------------------------------------------------------------------
+# post_summarize
+# ---------------------------------------------------------------------------
+# Derive the deterministic one-line summary for the sticky status comment.
+# Args: <review_mode>  (full | incremental)
+# Stdin: {"findings":[...], "prior":[...], "minors_count":N, "new_count":N}
+# Stdout: single-line summary
+#   full        -> "No findings."  (when blocking+major+minor all zero) OR
+#                  "<b> blocking, <m> major, <k> minor/nit findings."
+#                  b,m count severity blocker/major AND confidence high|medium;
+#                  k is minors_count.
+#   incremental -> "Resolved <r>, remaining <u>, new <n>."
+#                  r=prior status==fixed, u=prior status==unfixed, n=new_count.
+#
+# Usage: post_summarize <review_mode> < input.json
+post_summarize() {
+  local mode="$1"
+  local input
+  input="$(cat)"
+  jq -e . <<<"$input" >/dev/null || return 1
+  if [ "$mode" = "full" ]; then
+    jq -r '
+      ((.findings // []) | map(select(.severity == "blocker" and (.confidence == "high" or .confidence == "medium"))) | length) as $b |
+      ((.findings // []) | map(select(.severity == "major" and (.confidence == "high" or .confidence == "medium"))) | length) as $m |
+      (.minors_count) as $k |
+      if ($b == 0 and $m == 0 and $k == 0) then "No findings."
+      else "\($b) blocking, \($m) major, \($k) minor/nit findings."
+      end
+    ' <<<"$input"
+  else
+    jq -r '
+      ((.prior // []) | map(select(.status == "fixed")) | length) as $r |
+      ((.prior // []) | map(select(.status == "unfixed")) | length) as $u |
+      "Resolved \($r), remaining \($u), new \(.new_count)."
+    ' <<<"$input"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# post_compose_status_body
+# ---------------------------------------------------------------------------
+# Assemble the sticky status comment body (the impure `gh api -X PATCH` that
+# consumes it stays in the workflow).
+# Stdin: {"mode","last_sha","head_sha","repo_url","event_used","trigger_desc",
+#         "size_warning","config_warning","summary","state_marker"}
+# Stdout: the full status comment body (no trailing newline; matches the
+#         workflow's printf exactly, including the ai-review:ack marker).
+#
+# range_link: incremental w/ last_sha -> compare link; else single-commit link.
+# verdict_label: REQUEST_CHANGES/APPROVE/COMMENT pass through; anything else
+# is emitted verbatim. size_warning/config_warning each append a "\n"-suffixed
+# line when non-empty.
+#
+# Usage: post_compose_status_body < input.json
+post_compose_status_body() {
+  local input
+  input="$(cat)"
+  jq -e . <<<"$input" >/dev/null || return 1
+
+  local mode last_sha head_sha repo_url event_used trigger_desc
+  local size_warning config_warning summary state_marker
+  mode="$(jq -r '.mode // ""' <<<"$input")"
+  last_sha="$(jq -r '.last_sha // ""' <<<"$input")"
+  head_sha="$(jq -r '.head_sha // ""' <<<"$input")"
+  repo_url="$(jq -r '.repo_url // ""' <<<"$input")"
+  event_used="$(jq -r '.event_used // ""' <<<"$input")"
+  trigger_desc="$(jq -r '.trigger_desc // ""' <<<"$input")"
+  size_warning="$(jq -r '.size_warning // ""' <<<"$input")"
+  config_warning="$(jq -r '.config_warning // ""' <<<"$input")"
+  summary="$(jq -r '.summary // ""' <<<"$input")"
+  state_marker="$(jq -r '.state_marker // ""' <<<"$input")"
+
+  local short_head range_link
+  short_head="${head_sha:0:7}"
+  if [ "$mode" = "incremental" ] && [ -n "$last_sha" ]; then
+    range_link="[\`${last_sha:0:7}\`…\`${short_head}\`](${repo_url}/compare/${last_sha}...${head_sha})"
+  else
+    range_link="[\`${short_head}\`](${repo_url}/commit/${head_sha})"
+  fi
+
+  # Display label is the posted event verbatim (identity map today; add a case
+  # here if a label ever needs to diverge from its event name).
+  local verdict_label="$event_used"
+
+  local extra_lines=""
+  [ -n "$size_warning" ]   && extra_lines="${extra_lines}${size_warning}\n"
+  [ -n "$config_warning" ] && extra_lines="${extra_lines}${config_warning}\n"
+
+  local marker_ack="<!-- ai-review:ack -->"
+  printf '%s\n\n✅ ai-review: **%s** review of %s — **%s** (triggered by %s)\n\n%s\n%s%s' \
+    "$marker_ack" \
+    "$mode" \
+    "$range_link" \
+    "$verdict_label" \
+    "$trigger_desc" \
+    "$summary" \
+    "$extra_lines" \
+    "$state_marker"
+}

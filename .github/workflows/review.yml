@@ -1694,12 +1694,7 @@ jobs:
             inline_posted=true  # rung 1: inline comments posted as review threads
           else
             echo "::warning::Review POST failed (rung 1); degrading inline comments to minors block"
-            degrade_input="$(jq -n \
-              --arg w "$walkthrough" \
-              --argjson minors "$(jq -n --argjson v "$valid_inline" --argjson m "$all_minors" '$v + $m')" \
-              --argjson ds "$dropped_static" \
-              --argjson rej "$rejected" \
-              '{"walkthrough":$w,"inline":[],"minors":$minors,"dropped_static":$ds,"rejected":$rej}')"
+            degrade_input="$(post_fold_inline_to_minors <<<"$compose_input")"
             post_compose_review "$verdict" <<<"$degrade_input" > "$RUNNER_TEMP/review-degrade.json"
             if gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" \
                 --input "$RUNNER_TEMP/review-degrade.json" \
@@ -1709,10 +1704,8 @@ jobs:
               # Rung 3: permission-class degrade — only when intended verdict is APPROVE.
               if [ "$intended_verdict" = "APPROVE" ]; then
                 echo "::warning::Review POST failed (rung 2); posting APPROVE verdict as COMMENT (permission-class degrade)"
-                post_compose_review "COMMENT" <<<"$degrade_input" > "$RUNNER_TEMP/review-comment.json"
-                orig_body="$(jq -r '.body' "$RUNNER_TEMP/review-comment.json")"
-                new_body="$(printf '**Verdict: APPROVE** — posted as a comment because this repository does not allow GitHub Actions to approve pull requests.\n\n%s' "$orig_body")"
-                jq --arg b "$new_body" '.body = $b' "$RUNNER_TEMP/review-comment.json" > "$RUNNER_TEMP/review-comment2.json"
+                post_compose_review "COMMENT" <<<"$degrade_input" \
+                  | post_prepend_approval_notice > "$RUNNER_TEMP/review-comment2.json"
                 event_used="COMMENT"
                 inline_posted=false  # rung 3: inline folded into minors block, no threads
                 gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" \
@@ -1799,82 +1792,42 @@ jobs:
           matched="$(post_match_threads "$RUNNER_TEMP/posted-comments.json" "$RUNNER_TEMP/threads-post.json")"
 
           # --- 9. Build state findings array -----------------------------------
-          # Prior unfixed entries from the verified output.
-          prior_unfixed="$(jq -c '[.prior // [] | .[] | select(.status == "unfixed") | {
-            threadId: .threadId,
-            file: .path,
-            fingerprint: (.fingerprint // null),
-            severity: (.severity // null)
-          }]' "$RUNNER_TEMP/verified-fp.json")"
-
-          # Posted inline findings matched to threadIds.
-          posted_findings="$(jq -n \
+          # Pure transform (post_build_state_findings): APPROVE -> []; else
+          # prior(status==unfixed) ++ posted inline joined to matched threadIds.
+          # Pass the DERIVED verdict ($intended_verdict), not $event_used.
+          # $prior_json is reused by the summary envelope below (extract once).
+          prior_json="$(jq -c '.prior // []' "$RUNNER_TEMP/verified-fp.json")"
+          state_findings_input="$(jq -n \
+            --argjson prior "$prior_json" \
             --argjson inline "$valid_inline" \
             --argjson matched "$matched" \
-            '[range($inline | length) as $i |
-              ($inline[$i]) as $f |
-              ($matched | map(select(.path == $f.path and .body == $f.body)) | first // {"threadId": null}) as $m |
-              {
-                threadId: $m.threadId,
-                file: $f.path,
-                fingerprint: ($f.fingerprint // null),
-                severity: ($f.severity // null)
-              }]')"
-
-          # On APPROVE with nothing unfixed, state findings = []
-          if [ "$intended_verdict" = "APPROVE" ]; then
-            state_findings='[]'
-          else
-            state_findings="$(jq -n --argjson p "$prior_unfixed" --argjson n "$posted_findings" '$p + $n')"
-          fi
+            '{"prior":$prior,"inline":$inline,"matched":$matched}')"
+          state_findings="$(post_build_state_findings "$intended_verdict" <<<"$state_findings_input")"
 
           # --- 10. Compose state marker and update sticky comment --------------
           state_marker="$(post_compose_state "$HEAD_SHA" <<<"$state_findings")"
-          repo_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
-          short_head="${HEAD_SHA:0:7}"
-          if [ "$REVIEW_MODE" = "incremental" ] && [ -n "$LAST_SHA" ]; then
-            range_link="[\`${LAST_SHA:0:7}\`…\`${short_head}\`](${repo_url}/compare/${LAST_SHA}...${HEAD_SHA})"
-          else
-            range_link="[\`${short_head}\`](${repo_url}/commit/${HEAD_SHA})"
-          fi
-          # Deterministic one-line summary.
-          if [ "$REVIEW_MODE" = "full" ]; then
-            n_blocking="$(jq '[.findings // [] | .[] | select(.severity=="blocker" and (.confidence=="high" or .confidence=="medium"))] | length' "$RUNNER_TEMP/verified-fp.json")"
-            n_major="$(jq '[.findings // [] | .[] | select(.severity=="major" and (.confidence=="high" or .confidence=="medium"))] | length' "$RUNNER_TEMP/verified-fp.json")"
-            n_minor="$(jq 'length' <<<"$all_minors")"
-            if [ "$n_blocking" -eq 0 ] && [ "$n_major" -eq 0 ] && [ "$n_minor" -eq 0 ]; then
-              summary="No findings."
-            else
-              summary="${n_blocking} blocking, ${n_major} major, ${n_minor} minor/nit findings."
-            fi
-          else
-            n_resolved="$(jq '[.prior // [] | .[] | select(.status=="fixed")] | length' "$RUNNER_TEMP/verified-fp.json")"
-            n_remaining="$(jq '[.prior // [] | .[] | select(.status=="unfixed")] | length' "$RUNNER_TEMP/verified-fp.json")"
-            n_new="$(jq 'length' <<<"$valid_inline")"
-            summary="Resolved ${n_resolved}, remaining ${n_remaining}, new ${n_new}."
-          fi
-          # Verdict label (uses event actually posted).
-          case "$event_used" in
-            REQUEST_CHANGES) verdict_label="REQUEST_CHANGES" ;;
-            APPROVE)         verdict_label="APPROVE" ;;
-            COMMENT)         verdict_label="COMMENT" ;;
-            *)               verdict_label="$event_used" ;;
-          esac
-          # Build warnings lines.
-          extra_lines=""
-          [ -n "$SIZE_WARNING" ]   && extra_lines="${extra_lines}${SIZE_WARNING}\n"
-          [ -n "$CONFIG_WARNING" ] && extra_lines="${extra_lines}${CONFIG_WARNING}\n"
-
-          marker_ack="<!-- ai-review:ack -->"
-          status_body="$(printf '%s\n\n✅ ai-review: **%s** review of %s — **%s** (triggered by %s)\n\n%s\n%s%s' \
-            "$marker_ack" \
-            "$REVIEW_MODE" \
-            "$range_link" \
-            "$verdict_label" \
-            "$TRIGGER_DESC" \
-            "$summary" \
-            "$extra_lines" \
-            "$state_marker")"
+          # Deterministic one-line summary (pure transform: post_summarize).
+          summary_input="$(jq -n \
+            --argjson findings "$(jq -c '.findings // []' "$RUNNER_TEMP/verified-fp.json")" \
+            --argjson prior "$prior_json" \
+            --argjson minors_count "$(jq 'length' <<<"$all_minors")" \
+            --argjson new_count "$(jq 'length' <<<"$valid_inline")" \
+            '{"findings":$findings,"prior":$prior,"minors_count":$minors_count,"new_count":$new_count}')"
+          summary="$(post_summarize "$REVIEW_MODE" <<<"$summary_input")"
+          # Assemble the sticky status body (pure transform: post_compose_status_body).
+          status_body_input="$(jq -n \
+            --arg mode "$REVIEW_MODE" \
+            --arg last_sha "$LAST_SHA" \
+            --arg head_sha "$HEAD_SHA" \
+            --arg repo_url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            --arg event_used "$event_used" \
+            --arg trigger_desc "$TRIGGER_DESC" \
+            --arg size_warning "$SIZE_WARNING" \
+            --arg config_warning "$CONFIG_WARNING" \
+            --arg summary "$summary" \
+            --arg state_marker "$state_marker" \
+            '{"mode":$mode,"last_sha":$last_sha,"head_sha":$head_sha,"repo_url":$repo_url,"event_used":$event_used,"trigger_desc":$trigger_desc,"size_warning":$size_warning,"config_warning":$config_warning,"summary":$summary,"state_marker":$state_marker}')"
+          status_body="$(post_compose_status_body <<<"$status_body_input")"
           # Write to a temp file so we don't have to worry about shell quoting of the body.
           jq -n --arg body "$status_body" '{"body": $body}' > "$RUNNER_TEMP/status-update.json"
           gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$STATUS_COMMENT_ID" \
