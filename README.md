@@ -126,7 +126,7 @@ All of these keys follow the same base-branch trust rule: they are read from the
 
 **Fail-open**: a malformed or unknown-version `.ai-review.yml` causes the review to run with defaults, with a `⚠️ .ai-review.yml on <branch> is malformed — using defaults.` warning line in the status comment.
 
-**Pattern matching**: patterns use simplified glob matching (bash `case` fnmatch semantics — `*` crosses `/`, `dist/**` → `dist/*`). This covers the common cases; for advanced pathspec matching see `docs/design/pr-scope-config.md`.
+**Pattern matching**: patterns use simplified glob matching (bash `case` fnmatch semantics — `*` crosses `/`, `dist/**` → `dist/*`). This covers the common cases.
 
 ## Versioning
 
@@ -152,7 +152,7 @@ The pin locations `release.sh` touches:
 
 - Commands are gated by `author_association` (OWNER/MEMBER/COLLABORATOR) and bot comments are rejected.
 - Untrusted content (comment bodies, issue titles/bodies, state JSON) is passed via `env:` only — never interpolated into `run:` scripts.
-- All third-party actions are pinned to commit SHAs; every fetched tool binary (opencode, opengrep, gitleaks, osv-scanner, ripgrep, ruff, golangci-lint, oxlint, shellcheck, hadolint, actionlint, zizmor, trivy, typos) is pinned by version + sha256, and the OpenGrep community ruleset is pinned to a commit (no install-latest-at-runtime). See `docs/design/pinned-binary-unpinned-data.md` for how scanners that need runtime data (osv advisory DB, trivy misconfig rules, golangci module graph) are handled without breaking the pin invariant.
+- All third-party actions are pinned to commit SHAs; every fetched tool binary (opencode, opengrep, gitleaks, osv-scanner, ripgrep, ruff, golangci-lint, oxlint, shellcheck, hadolint, actionlint, zizmor, trivy, typos) is pinned by version + sha256, and the OpenGrep community ruleset is pinned to a commit (no install-latest-at-runtime). Scanners that need runtime data (osv advisory DB, trivy misconfig rules, golangci module graph) fetch only that data at runtime, without breaking the pin invariant.
 - Privilege separation: the LLM drafter and skeptic steps run without a GitHub token (they write findings to local files only); the deterministic posting step within `llm-review` and the `finalize` job are the only steps that hold `github.token` and call the GitHub API — no LLM runs in those steps.
 - Scanners never fail the build; findings flow to the LLM as data.
 - Fork PRs receive no secrets (GitHub default), so the caller template skips them via a `head.repo == repository` condition (`LLM_API_KEY` would be empty); a collaborator can trigger `/review` on the PR instead.
@@ -170,7 +170,7 @@ The pin locations `release.sh` touches:
 
 - No auto-resolve UI buttons (no "Fix all").
 - No cross-PR memory; incremental state is per-PR.
-- Path filters use simplified glob matching (bash fnmatch, not full gitignore semantics) — advanced patterns like character classes or negation are not supported; see `docs/design/pr-scope-config.md`.
+- Path filters use simplified glob matching (bash fnmatch, not full gitignore semantics) — advanced patterns like character classes or negation are not supported.
 - Auto-detected guidelines scan `.cursor/rules/` one directory level only (not recursive), and filename detection is case-sensitive (`agents.md` is not matched).
 - The `context` job is heuristic identifier grep, not a real call graph — expect occasional false leads, and on large repos the sweep adds latency.
 - Review posting (inline comments, verdict, state marker) is deterministic workflow bash (`scripts/lib/post.sh`); the LLM passes write candidate findings files, not GitHub API calls.
