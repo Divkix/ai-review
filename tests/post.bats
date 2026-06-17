@@ -1150,6 +1150,31 @@ EOF
   echo "$output" | grep -qF 'WARN_CONFIG'
 }
 
+@test "compose_status_body: warnings and marker render on their own lines (newline regression)" {
+  run post_compose_status_body <<'EOF'
+{
+  "mode": "incremental",
+  "last_sha": "0123456789abcdef",
+  "head_sha": "fedcba9876543210",
+  "repo_url": "https://github.com/o/r",
+  "event_used": "APPROVE",
+  "trigger_desc": "/review by @y",
+  "size_warning": "WARN_SIZE",
+  "config_warning": "WARN_CONFIG",
+  "summary": "SUMMARY.",
+  "state_marker": "MARKER"
+}
+EOF
+  [ "$status" -eq 0 ]
+  # No literal two-char backslash-n may survive in the rendered body.
+  ! printf '%s' "$output" | grep -qF '\n'
+  # Each warning and the marker occupy their own physical line
+  # (bats splits $output into $lines on real newlines; grep -x = whole-line match).
+  [ "$(printf '%s\n' "${lines[@]}" | grep -cx 'WARN_SIZE')" -eq 1 ]
+  [ "$(printf '%s\n' "${lines[@]}" | grep -cx 'WARN_CONFIG')" -eq 1 ]
+  [ "$(printf '%s\n' "${lines[@]}" | grep -cx 'MARKER')" -eq 1 ]
+}
+
 # ---------------------------------------------------------------------------
 # I2: malformed stdin failure-mode tests
 # Each stdin-consuming function must exit non-zero on non-JSON input.

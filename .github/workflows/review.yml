@@ -472,8 +472,8 @@ jobs:
           [ -n "$STATE_JSON" ] && state_line="<!-- ai-review:state $STATE_JSON -->"
           # Append config_warning and size_warning before the state line when set.
           extra_lines=""
-          [ -n "$CONFIG_WARNING" ] && extra_lines="${extra_lines}${CONFIG_WARNING}\n"
-          [ -n "$SIZE_WARNING" ] && extra_lines="${extra_lines}${SIZE_WARNING}\n"
+          [ -n "$CONFIG_WARNING" ] && extra_lines="${extra_lines}${CONFIG_WARNING}"$'\n'
+          [ -n "$SIZE_WARNING" ] && extra_lines="${extra_lines}${SIZE_WARNING}"$'\n'
           body="$(printf '%s\n\n🔍 ai-review: **%s** review of %s in progress… (triggered by %s)\n\n%s%s' \
             "$marker" "$MODE" "$range" "$trigger" "$extra_lines" "$state_line")"
           existing_id="$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \

@@ -661,8 +661,8 @@ post_compose_status_body() {
   local verdict_label="$event_used"
 
   local extra_lines=""
-  [ -n "$size_warning" ]   && extra_lines="${extra_lines}${size_warning}\n"
-  [ -n "$config_warning" ] && extra_lines="${extra_lines}${config_warning}\n"
+  [ -n "$size_warning" ]   && extra_lines="${extra_lines}${size_warning}"$'\n'
+  [ -n "$config_warning" ] && extra_lines="${extra_lines}${config_warning}"$'\n'
 
   local marker_ack="<!-- ai-review:ack -->"
   printf '%s\n\n✅ ai-review: **%s** review of %s — **%s** (triggered by %s)\n\n%s\n%s%s' \
