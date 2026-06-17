@@ -18,15 +18,25 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# Single source of truth for the tool roster + download URLs (shared with
+# scripts/bump-pins.sh; unit-tested by tests/pins.bats).
+# shellcheck source=scripts/lib/pins.sh
+. scripts/lib/pins.sh
+
 WORKFLOWS=(.github/workflows/review.yml .github/workflows/commands.yml)
 fail=0
 err() { echo "::error::$*" >&2; fail=1; }
 
+# Temp files for the two live-download sections. One trap cleans up both: a
+# second `trap ... EXIT` would *replace* the first, leaking the earlier file.
+tmp="" tmp_scanner=""
+trap 'rm -f "$tmp" "$tmp_scanner"' EXIT
+
 # --- 1 & 2: OPENCODE_VERSION / OPENCODE_SHA256 internal consistency ----------
-mapfile -t versions < <(grep -rhoE 'OPENCODE_VERSION="[^"]+"' "${WORKFLOWS[@]}" \
-  | sed -E 's/.*="([^"]+)"/\1/' | sort -u)
-mapfile -t shas < <(grep -rhoE 'OPENCODE_SHA256="[0-9a-f]+"' "${WORKFLOWS[@]}" \
-  | sed -E 's/.*="([^"]+)"/\1/' | sort -u)
+# Extraction mechanics live in pins.sh (shared with the bumper); here we add
+# `sort -u` to assert all copies agree.
+mapfile -t versions < <(pins_grep_assignments OPENCODE_VERSION "${WORKFLOWS[@]}" | sort -u)
+mapfile -t shas < <(pins_grep_assignments OPENCODE_SHA256 "${WORKFLOWS[@]}" | sort -u)
 
 if [ "${#versions[@]}" -eq 0 ]; then
   err "no OPENCODE_VERSION pins found"
@@ -51,9 +61,8 @@ if [ "${CHECK_PINS_OFFLINE:-0}" = "1" ]; then
 elif [ "$fail" -eq 0 ]; then
   ver="${versions[0]}"
   want="${shas[0]}"
-  url="https://github.com/anomalyco/opencode/releases/download/v${ver}/opencode-linux-x64.tar.gz"
+  url="$(pins_url OPENCODE "$ver")"
   tmp="$(mktemp)"
-  trap 'rm -f "$tmp"' EXIT
   echo "fetching $url"
   if curl -fsSL -o "$tmp" "$url"; then
     got="$(sha256sum "$tmp" | cut -d' ' -f1)"
@@ -70,33 +79,14 @@ fi
 # --- 3b: scanner binary + rules-ref pin consistency -------------------------
 REVIEW_WF=.github/workflows/review.yml
 
-# Single source-of-truth tool list — used by BOTH the consistency loop and the
-# live-verification loop below. Add/remove tools here only.
-TOOLS=(OPENGREP GITLEAKS OSV_SCANNER RIPGREP RUFF GOLANGCI OXLINT SHELLCHECK HADOLINT ACTIONLINT ZIZMOR TRIVY TYPOS ASTGREP)
-
-# Per-tool: assert exactly one distinct VERSION and one distinct SHA256.
-# URL templates use $ver below (set per-tool).
-declare -A TOOL_URL
-TOOL_URL[OPENGREP]="https://github.com/opengrep/opengrep/releases/download/v\${ver}/opengrep_manylinux_x86"
-TOOL_URL[GITLEAKS]="https://github.com/gitleaks/gitleaks/releases/download/v\${ver}/gitleaks_\${ver}_linux_x64.tar.gz"
-TOOL_URL[OSV_SCANNER]="https://github.com/google/osv-scanner/releases/download/v\${ver}/osv-scanner_linux_amd64"
-TOOL_URL[RIPGREP]="https://github.com/BurntSushi/ripgrep/releases/download/\${ver}/ripgrep-\${ver}-x86_64-unknown-linux-musl.tar.gz"
-TOOL_URL[RUFF]="https://github.com/astral-sh/ruff/releases/download/\${ver}/ruff-x86_64-unknown-linux-gnu.tar.gz"
-TOOL_URL[GOLANGCI]="https://github.com/golangci/golangci-lint/releases/download/v\${ver}/golangci-lint-\${ver}-linux-amd64.tar.gz"
-TOOL_URL[OXLINT]="https://github.com/oxc-project/oxc/releases/download/\${ver}/oxlint-x86_64-unknown-linux-gnu.tar.gz"
-TOOL_URL[SHELLCHECK]="https://github.com/koalaman/shellcheck/releases/download/\${ver}/shellcheck-\${ver}.linux.x86_64.tar.xz"
-TOOL_URL[HADOLINT]="https://github.com/hadolint/hadolint/releases/download/\${ver}/hadolint-linux-x86_64"
-TOOL_URL[ACTIONLINT]="https://github.com/rhysd/actionlint/releases/download/v\${ver}/actionlint_\${ver}_linux_amd64.tar.gz"
-TOOL_URL[ZIZMOR]="https://github.com/zizmorcore/zizmor/releases/download/\${ver}/zizmor-x86_64-unknown-linux-gnu.tar.gz"
-TOOL_URL[TRIVY]="https://github.com/aquasecurity/trivy/releases/download/v\${ver}/trivy_\${ver}_Linux-64bit.tar.gz"
-TOOL_URL[TYPOS]="https://github.com/crate-ci/typos/releases/download/\${ver}/typos-\${ver}-x86_64-unknown-linux-musl.tar.gz"
-TOOL_URL[ASTGREP]="https://github.com/ast-grep/ast-grep/releases/download/\${ver}/app-x86_64-unknown-linux-gnu.zip"
+# Single source-of-truth tool list — the sha256-pinned scanner binaries come
+# from scripts/lib/pins.sh (shared with the bumper; add/remove tools there).
+# Download URLs are built per-tool via pins_url; no local map needed.
+mapfile -t TOOLS < <(pins_scanners)
 
 for tool in "${TOOLS[@]}"; do
-  mapfile -t tool_versions < <(grep -hoE "${tool}_VERSION=\"[^\"]+\"" "$REVIEW_WF" \
-    | sed -E 's/.*="([^"]+)"/\1/' | sort -u)
-  mapfile -t tool_shas < <(grep -hoE "${tool}_SHA256=\"[0-9a-f]+\"" "$REVIEW_WF" \
-    | sed -E 's/.*="([^"]+)"/\1/' | sort -u)
+  mapfile -t tool_versions < <(pins_grep_assignments "${tool}_VERSION" "$REVIEW_WF" | sort -u)
+  mapfile -t tool_shas < <(pins_grep_assignments "${tool}_SHA256" "$REVIEW_WF" | sort -u)
   if [ "${#tool_versions[@]}" -eq 0 ]; then
     err "no ${tool}_VERSION pin found in $REVIEW_WF"
   elif [ "${#tool_versions[@]}" -ne 1 ]; then
@@ -113,8 +103,7 @@ for tool in "${TOOLS[@]}"; do
 done
 
 # Assert OPENGREP_RULES_REF is a 40-char hex commit.
-mapfile -t rules_refs < <(grep -hoE 'OPENGREP_RULES_REF="[^"]+"' "$REVIEW_WF" \
-  | sed -E 's/.*="([^"]+)"/\1/' | sort -u)
+mapfile -t rules_refs < <(pins_grep_assignments OPENGREP_RULES_REF "$REVIEW_WF" | sort -u)
 if [ "${#rules_refs[@]}" -eq 0 ]; then
   err "no OPENGREP_RULES_REF pin found in $REVIEW_WF"
 elif [ "${#rules_refs[@]}" -ne 1 ]; then
@@ -130,17 +119,13 @@ if [ "${CHECK_PINS_OFFLINE:-0}" = "1" ]; then
   echo "CHECK_PINS_OFFLINE=1 — skipping live scanner sha256 verification"
 elif [ "$fail" -eq 0 ]; then
   tmp_scanner="$(mktemp)"
-  trap 'rm -f "$tmp_scanner"' EXIT
   for tool in "${TOOLS[@]}"; do
-    mapfile -t tv < <(grep -hoE "${tool}_VERSION=\"[^\"]+\"" "$REVIEW_WF" \
-      | sed -E 's/.*="([^"]+)"/\1/' | sort -u)
-    mapfile -t ts < <(grep -hoE "${tool}_SHA256=\"[0-9a-f]+\"" "$REVIEW_WF" \
-      | sed -E 's/.*="([^"]+)"/\1/' | sort -u)
+    mapfile -t tv < <(pins_grep_assignments "${tool}_VERSION" "$REVIEW_WF" | sort -u)
+    mapfile -t ts < <(pins_grep_assignments "${tool}_SHA256" "$REVIEW_WF" | sort -u)
     ver="${tv[0]}"
     want="${ts[0]}"
-    # Expand the URL template (uses $ver).
-    # shellcheck disable=SC2059
-    url="$(eval "echo \"${TOOL_URL[$tool]}\"")"
+    # Build the asset URL from the shared pins.sh descriptor (no eval).
+    url="$(pins_url "$tool" "$ver")"
     echo "fetching $url"
     if curl -fsSL -o "$tmp_scanner" "$url"; then
       got="$(sha256sum "$tmp_scanner" | cut -d' ' -f1)"

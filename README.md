@@ -78,6 +78,10 @@ Open a pull request against the branch your caller workflow watches. Within a mi
 - **Model**: set the `model`, `variant`, and `api_key_env` inputs in your caller workflow (see the commented-out `with:` block in the templates) — no fork needed. Default is `deepseek/deepseek-v4-pro` with `variant: max`; any [models.dev](https://models.dev) provider works with its corresponding `api_key_env`. Use `verifier_model` and `verifier_variant` to run the skeptic pass on a different (e.g. stronger or cheaper) model. The scaffolding (scanners, context, ranking, lifecycle) is model-agnostic; pointing it at a stronger model is the single biggest review-quality lever.
 - **opencode CLI**: pinned by version + sha256 in the workflows (`OPENCODE_VERSION` in `review.yml` ×1 and `commands.yml` ×2). Bump both values together.
 
+### Keeping pins current (automated)
+
+You don't have to track tool releases by hand. A weekly workflow (`.github/workflows/bump-pins.yml`, also runnable on demand via **Actions → Bump pins → Run workflow**) watches every pinned tool — the 12 scanners, opencode, ripgrep, ast-grep, and the `OPENGREP_RULES_REF` community-rules commit — and opens **one PR per tool** when a newer version exists. Each PR updates the version **and** the sha256 together (the hash is recomputed from the downloaded asset), so it passes `check-pins.sh` by construction. Nothing auto-merges; you review and merge. Third-party GitHub Action `@sha` pins are kept current separately by `.github/dependabot.yml`. The tool roster + download URLs live in one place — `scripts/lib/pins.sh` — shared by the checker and the bumper.
+
 ## Per-repo configuration
 
 Place a `.ai-review.yml` file at the root of the **base branch** to tune scope and size limits:
@@ -172,9 +176,9 @@ There are no live PRs in CI — `.github/workflows/ci.yml` runs four static jobs
 | Job | What it guards | Run locally |
 |---|---|---|
 | **lint** | `actionlint` (+ bundled `shellcheck`) on both workflows | `actionlint .github/workflows/*.yml` |
-| **pins** | `OPENCODE_VERSION`/`OPENCODE_SHA256` in sync across all copies; each scanner binary (`OPENGREP`, `GITLEAKS`, `OSV_SCANNER`, `RIPGREP`, and 9 new tools) has a single `VERSION` + `SHA256` matching the real release asset; `OPENGREP_RULES_REF` is a 40-char commit; all `vN` pins share one major | `scripts/check-pins.sh` (offline: `CHECK_PINS_OFFLINE=1`) |
+| **pins** | `OPENCODE_VERSION`/`OPENCODE_SHA256` in sync across all copies; each scanner binary (`OPENGREP`, `GITLEAKS`, `OSV_SCANNER`, `RIPGREP`, and 9 new tools) has a single `VERSION` + `SHA256` matching the real release asset; `OPENGREP_RULES_REF` is a 40-char commit; all `vN` pins share one major. Tool roster + URLs come from `scripts/lib/pins.sh` (shared with the bumper) | `scripts/check-pins.sh` (offline: `CHECK_PINS_OFFLINE=1`) |
 | **contract** | every `$VAR` the prompts read is set in a workflow `env:`; caller templates grant a permission superset; the gate's state-marker regex matches `reconcile.sh` | `python3 scripts/check-contract.py` |
-| **unit** | the pure lib scripts the workflows source (`scripts/lib/*.sh`) — baseline fallback, state parsing, SARIF merge, cross-file impact map | `bats tests/` |
+| **unit** | the pure lib scripts the workflows source (`scripts/lib/*.sh`) — baseline fallback, state parsing, SARIF merge, cross-file impact map, pin roster/bumper transforms | `bats tests/` |
 
 The review/finalize jobs `source scripts/lib/reconcile.sh` (checked out as `.ai-review-tooling`), so the bats tests exercise the *same* code the workflows run — no copy drift. When bumping the opencode pin, change `OPENCODE_VERSION` **and** `OPENCODE_SHA256` together (all three copies); the **pins** job fails otherwise.
 

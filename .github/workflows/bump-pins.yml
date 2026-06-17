@@ -1,0 +1,134 @@
+# Weekly pin bumper. Watches every pinned tool (12 scanners + opencode + ripgrep
+# + ast-grep + the opengrep-rules commit) and, when a newer version exists, opens
+# ONE PR per tool that updates the version AND the sha256 together. The new hash
+# is computed from the actual downloaded asset, so each PR passes check-pins.sh
+# by construction (unlike a version-only Renovate bump). Nothing auto-merges.
+#
+# GitHub Action @sha pins are handled separately by .github/dependabot.yml.
+#
+# NOTE: PRs opened with the default GITHUB_TOKEN do NOT trigger other workflow
+# runs (GitHub anti-recursion). The in-job offline check + actionlint
+# pre-validate each bump; the full live `pins` CI runs on push after merge.
+name: Bump pins
+
+on:
+  schedule:
+    # Mondays 07:00 UTC.
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+    inputs:
+      tool:
+        description: "Bump a single tool only (e.g. GITLEAKS); blank = all"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bump-pins
+  cancel-in-progress: false
+
+jobs:
+  # Build the per-tool matrix from scripts/lib/pins.sh (single source of truth).
+  matrix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      tools: ${{ steps.gen.outputs.tools }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Generate tool matrix
+        id: gen
+        env:
+          ONLY_TOOL: ${{ github.event.inputs.tool }}
+        run: |
+          set -euo pipefail
+          # shellcheck source=scripts/lib/pins.sh
+          . scripts/lib/pins.sh
+          if [ -n "$ONLY_TOOL" ]; then
+            if [ -z "$(pins_kind "$ONLY_TOOL")" ]; then
+              echo "::error::unknown tool '$ONLY_TOOL' (not in scripts/lib/pins.sh)"; exit 1
+            fi
+            tools="[\"${ONLY_TOOL}\"]"
+          else
+            tools="$(pins_bump_matrix_json)"
+          fi
+          echo "tools=$tools" >> "$GITHUB_OUTPUT"
+          echo "matrix: $tools"
+
+  bump:
+    needs: matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        tool: ${{ fromJSON(needs.matrix.outputs.tools) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+          # Keep credentials so the branch push + gh pr create authenticate.
+          persist-credentials: true
+
+      - name: Configure git identity
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898024+github-actions[bot]@users.noreply.github.com"
+
+      - name: Bump pin
+        id: bump
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TOOL: ${{ matrix.tool }}
+        run: |
+          set -euo pipefail
+          bash scripts/bump-pins.sh "$TOOL"
+
+      - name: Pre-validate bumped pins
+        if: steps.bump.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          # sha256 is correct by construction; this asserts internal consistency.
+          CHECK_PINS_OFFLINE=1 bash scripts/check-pins.sh
+
+      - name: Open pull request
+        if: steps.bump.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TOOL: ${{ matrix.tool }}
+          BRANCH: ${{ steps.bump.outputs.branch }}
+          TITLE: ${{ steps.bump.outputs.title }}
+          OLD: ${{ steps.bump.outputs.old }}
+          NEW: ${{ steps.bump.outputs.new }}
+        run: |
+          set -euo pipefail
+          # Idempotent: if the branch already exists on the remote, a PR was
+          # already opened for this exact version — skip.
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+            echo "Branch $BRANCH already exists on origin — PR already open; skipping."
+            exit 0
+          fi
+          git switch -c "$BRANCH"
+          git add -A
+          git commit -m "$TITLE"
+          git push -u origin "$BRANCH"
+          # shellcheck disable=SC2016  # literal backticks/%s are markdown in the printf format
+          body="$(printf 'Automated pin bump.\n\n- **Tool:** `%s`\n- **From:** `%s`\n- **To:** `%s`\n\nVersion and sha256 were updated together; the new sha256 was computed from the downloaded release asset, so `scripts/check-pins.sh` passes. Merge to apply; the live `pins` CI re-verifies on push to `main`.' \
+            "$TOOL" "$OLD" "$NEW")"
+          gh pr create \
+            --title "$TITLE" \
+            --body "$body" \
+            --base main \
+            --head "$BRANCH" \
+            --label dependencies
