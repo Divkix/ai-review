@@ -184,7 +184,7 @@ There are no live PRs in CI — `.github/workflows/ci.yml` runs four static jobs
 |---|---|---|
 | **lint** | `actionlint` (+ bundled `shellcheck`) on both workflows | `actionlint .github/workflows/*.yml` |
 | **pins** | `OPENCODE_VERSION`/`OPENCODE_SHA256` in sync across all copies; each scanner binary (`OPENGREP`, `GITLEAKS`, `OSV_SCANNER`, `RIPGREP`, and 9 new tools) has a single `VERSION` + `SHA256` matching the real release asset; `OPENGREP_RULES_REF` is a 40-char commit; all `vN` pins share one major. Tool roster + URLs come from `scripts/lib/pins.sh` (shared with the bumper) | `scripts/check-pins.sh` (offline: `CHECK_PINS_OFFLINE=1`) |
-| **contract** | every `$VAR` the prompts read is set in a workflow `env:`; caller templates grant a permission superset; the gate's state-marker regex matches `reconcile.sh` | `python3 scripts/check-contract.py` |
+| **contract** | every `$VAR` the prompts read is set in a workflow `env:`; caller templates grant a permission superset; no invalid `gh api ... -o` flag usage | `python3 scripts/check-contract.py` |
 | **unit** | the pure lib scripts the workflows source (`scripts/lib/*.sh`) — baseline fallback, state parsing, SARIF merge, cross-file impact map, pin roster/bumper transforms | `bats tests/` |
 
 The review/finalize jobs `source scripts/lib/reconcile.sh` (checked out as `.ai-review-tooling`), so the bats tests exercise the *same* code the workflows run — no copy drift. When bumping the opencode pin, change `OPENCODE_VERSION` **and** `OPENCODE_SHA256` together (all three copies); the **pins** job fails otherwise.
