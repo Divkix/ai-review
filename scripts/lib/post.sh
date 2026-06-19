@@ -335,10 +335,10 @@ post_compose_review() {
   if [ "$minors_count" -gt 0 ]; then
     local minors_section
     minors_section="$(jq -r '
-      "\n\n<details><summary>Minor suggestions (\(length))</summary>\n" +
+      "\n\n<details><summary>Minor suggestions (\(length))</summary>\n\n" +
       (map("- `" + (.path // "?") + ":" + ((.line // 0) | tostring) + "` — " +
            ((.body // "") | split("\n")[0])) | join("\n")) +
-      "\n</details>"
+      "\n\n</details>"
     ' <<<"$minors_json")"
     body="${body}${minors_section}"
   fi
@@ -350,10 +350,10 @@ post_compose_review() {
   if [ "$dropped_count" -gt 0 ]; then
     local dropped_section
     dropped_section="$(jq -r '
-      "\n\n<details><summary>Dropped static findings (\(length))</summary>\n" +
+      "\n\n<details><summary>Dropped static findings (\(length))</summary>\n\n" +
       (map("- **" + (.tool // "?") + "** `" + (.rule_id // "?") + "` in `" +
            (.path // "?") + "`: " + (.reason // "")) | join("\n")) +
-      "\n</details>"
+      "\n\n</details>"
     ' <<<"$dropped_static_json")"
     body="${body}${dropped_section}"
   fi

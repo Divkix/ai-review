@@ -573,6 +573,45 @@ EOF
   echo "$output" | jq -e '.body | contains("SEC001")'
 }
 
+@test "compose_review: dropped_static section has blank line after summary so GFM renders the list" {
+  run post_compose_review "APPROVE" <<'EOF'
+{
+  "walkthrough": "LGTM",
+  "inline": [],
+  "minors": [],
+  "dropped_static": [
+    {"tool":"gitleaks","rule_id":"generic-api-key","path":"a.py","reason":"Pre-existing finding in file not changed by this PR"},
+    {"tool":"gitleaks","rule_id":"curl-auth-header","path":"README.md","reason":"Pre-existing finding in file not changed by this PR"}
+  ],
+  "rejected": []
+}
+EOF
+  [ "$status" -eq 0 ]
+  # GitHub-Flavored Markdown only renders a list inside <details> when a blank
+  # line separates </summary> from the bullets (and the bullets from </details>);
+  # a single newline collapses them into one paragraph.
+  echo "$output" | jq -e '.body | contains("</summary>\n\n- ")'
+  echo "$output" | jq -e '.body | contains("\n\n</details>")'
+}
+
+@test "compose_review: minors section has blank line after summary so GFM renders the list" {
+  run post_compose_review "APPROVE" <<'EOF'
+{
+  "walkthrough": "LGTM",
+  "inline": [],
+  "minors": [
+    {"path":"x.py","line":5,"body":"Rename for clarity."},
+    {"path":"y.py","line":9,"body":"Extract a helper."}
+  ],
+  "dropped_static": [],
+  "rejected": []
+}
+EOF
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.body | contains("</summary>\n\n- ")'
+  echo "$output" | jq -e '.body | contains("\n\n</details>")'
+}
+
 @test "compose_review: multi-line comment uses start_line/start_side" {
   run post_compose_review "REQUEST_CHANGES" <<'EOF'
 {
