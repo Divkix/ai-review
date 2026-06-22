@@ -700,8 +700,8 @@ jobs:
       - name: Install ruff 0.15.17
         run: |
           set -euo pipefail
-          RUFF_VERSION="0.15.17"
-          RUFF_SHA256="7bca4641db4b0256d20f3a8c38057725e0982965639f5f9a0fb2f9aece4b7c4f"
+          RUFF_VERSION="0.15.18"
+          RUFF_SHA256="1ffb1d5e04e60347be17c514cbb19303d6d8c75f629060ed481a150337dbf060"
           curl -fsSL -o /tmp/ruff.tar.gz \
             "https://github.com/astral-sh/ruff/releases/download/${RUFF_VERSION}/ruff-x86_64-unknown-linux-gnu.tar.gz"
           echo "${RUFF_SHA256}  /tmp/ruff.tar.gz" | sha256sum -c -
