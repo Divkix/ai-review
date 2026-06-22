@@ -558,8 +558,8 @@ jobs:
       - name: Install opengrep v1.22.0
         run: |
           set -euo pipefail
-          OPENGREP_VERSION="1.22.0"
-          OPENGREP_SHA256="45bcd58440e397ed52c50e953ccf5948909ea77087c9186fc7d277216f62e319"
+          OPENGREP_VERSION="1.23.0"
+          OPENGREP_SHA256="1f06548af379ab6080698a609612890ffad2d92dc2172f1e97d38d48096d5ef8"
           curl -fsSL -o /tmp/opengrep \
             "https://github.com/opengrep/opengrep/releases/download/v${OPENGREP_VERSION}/opengrep_manylinux_x86"
           echo "${OPENGREP_SHA256}  /tmp/opengrep" | sha256sum -c -
