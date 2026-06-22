@@ -181,8 +181,10 @@ guard (exit non-zero).
 Use Conventional Commits: `feat:`, `fix:`, `docs:`, `ci:` (see `git log`); imperative subject scoped
 to one change; pass CI; note pin/version bumps. **Alpha**: callers pin an exact tag (e.g. `@v0.2.0`),
 not a floating major. Release via `release.yml` (**Actions → Release → Run workflow** with the tag:
-runs `release.sh`, commits the pin bump to `main`, pushes the annotated tag; needs `BUMP_PINS_TOKEN`)
-or push a tag by hand after `scripts/release.sh <tag>` locally. The tag push runs `make check` + the
+the `prepare` job's **Resolve release tag** step normalizes the input to one `v` prefix — `0.5.0`
+and `v0.5.0` both work — and validates `vX.Y.Z[-pre]`, then runs `release.sh`, commits the pin bump
+to `main`, pushes the annotated tag; needs `BUMP_PINS_TOKEN`) or push a tag by hand after
+`scripts/release.sh <tag>` locally (the script applies the same `v`-prefix normalization). The tag push runs `make check` + the
 `EXPECT_PIN_TAG` guard (the single internal pin must EQUAL the tag) and publishes a Release with
 auto-generated notes. `release.sh` auto-updates the README caller-pin pointer (the `currently `@vX``
 token); migration notes are not maintained pre-1.0. After tagging, validate with an e2e pass in a

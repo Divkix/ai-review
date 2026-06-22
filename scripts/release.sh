@@ -10,10 +10,11 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # --- arg validation ----------------------------------------------------------
-new_tag="${1:-}"
+# Normalize to exactly one leading 'v' so '0.5.0' and 'v0.5.0' both work.
+new_tag="v${1#v}"
 # Accept a stable vX.Y.Z tag or a pre-release vX.Y.Z-<suffix> (e.g. v0.3.0-rc.1),
 # so an rc can be cut for sandbox e2e validation before the final tag.
-if [[ ! "$new_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+if [ -z "${1:-}" ] || [[ ! "$new_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
   echo "usage: scripts/release.sh v<MAJOR>.<MINOR>.<PATCH>[-<prerelease>]" >&2
   exit 1
 fi

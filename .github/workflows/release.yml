@@ -53,15 +53,20 @@ jobs:
             exit 1
           fi
 
-      - name: Validate tag format
+      - name: Resolve release tag
+        id: tag
         env:
-          TAG: ${{ github.event.inputs.tag }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
         run: |
           set -euo pipefail
-          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
-            echo "::error::tag '$TAG' must be vMAJOR.MINOR.PATCH[-prerelease]" >&2
+          # Normalize to exactly one leading 'v' so '0.5.0' and 'v0.5.0' both work.
+          tag="v${INPUT_TAG#v}"
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "::error::tag '$tag' must be vMAJOR.MINOR.PATCH[-prerelease]" >&2
             exit 1
           fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Resolved release tag: $tag"
 
       - name: Checkout main
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -92,7 +97,7 @@ jobs:
       - name: Bump internal pins to the tag
         id: bump
         env:
-          TAG: ${{ github.event.inputs.tag }}
+          TAG: ${{ steps.tag.outputs.tag }}
         run: |
           set -euo pipefail
           # Refuse if the tag already exists (locally or on origin).
@@ -111,7 +116,7 @@ jobs:
 
       - name: Create and push the tag
         env:
-          TAG: ${{ github.event.inputs.tag }}
+          TAG: ${{ steps.tag.outputs.tag }}
         run: |
           set -euo pipefail
           # Tag the commit that now carries the bumped pins.
