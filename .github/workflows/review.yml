@@ -762,8 +762,8 @@ jobs:
       - name: Install oxlint apps_v1.69.0
         run: |
           set -euo pipefail
-          OXLINT_VERSION="apps_v1.70.0"
-          OXLINT_SHA256="cba0142899d1ed1c79d4ff3a8a6c715cd06b5df74085abb7f5df47fb3fc3a42c"
+          OXLINT_VERSION="apps_v1.71.0"
+          OXLINT_SHA256="e7f2d01b923b71fbf32116a6b19ce8998cf29f387c3ad6f83e0048ef58214f73"
           curl -fsSL -o /tmp/oxlint.tar.gz \
             "https://github.com/oxc-project/oxc/releases/download/${OXLINT_VERSION}/oxlint-x86_64-unknown-linux-gnu.tar.gz"
           echo "${OXLINT_SHA256}  /tmp/oxlint.tar.gz" | sha256sum -c -
