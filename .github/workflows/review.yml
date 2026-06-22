@@ -149,7 +149,7 @@ jobs:
       # one tag so this ref is covered automatically.
       - name: Checkout ai-review tooling (lib)
         if: steps.resolve.outputs.skip != 'true'
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: divkix/ai-review
           ref: v0.4.7
@@ -512,7 +512,7 @@ jobs:
       security-events: write
     steps:
       - name: Checkout PR head (caller repo)
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           # Pin to the exact SHA the gate resolved (not refs/pull/N/head) so a
           # push between gate and checkout can't swap in unreviewed code.
@@ -524,7 +524,7 @@ jobs:
       # baseline step so it can source scripts/lib/reconcile.sh; into a subpath
       # so it never disturbs the PR-head working tree.
       - name: Checkout ai-review tooling (rules + lib)
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: divkix/ai-review
           ref: v0.4.7
@@ -1030,7 +1030,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout PR head (caller repo)
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ needs.gate.outputs.head_sha }}
           fetch-depth: 0
@@ -1040,7 +1040,7 @@ jobs:
       # context job can source scripts/lib/context.sh; into a subpath so it
       # never disturbs the PR-head working tree.
       - name: Checkout ai-review tooling (lib)
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: divkix/ai-review
           ref: v0.4.7
@@ -1153,7 +1153,7 @@ jobs:
       intended_verdict: ${{ steps.post.outputs.intended_verdict }}
     steps:
       - name: Checkout PR head (caller repo)
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           # Pin to the exact SHA the gate resolved (not refs/pull/N/head) so a
           # push between gate and checkout can't swap in unreviewed code.
@@ -1165,7 +1165,7 @@ jobs:
 
       # Bump ref when releasing v2 of divkix/ai-review.
       - name: Checkout ai-review tooling (prompts + lib)
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: divkix/ai-review
           ref: v0.4.7
@@ -1864,7 +1864,7 @@ jobs:
       # source them. Bump ref when releasing v2. No PR-head checkout is needed
       # — this job only talks to the GitHub API.
       - name: Checkout ai-review tooling (lib)
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: divkix/ai-review
           ref: v0.4.7
