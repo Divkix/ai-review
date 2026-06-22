@@ -904,8 +904,8 @@ jobs:
       - name: Install trivy v0.71.0
         run: |
           set -euo pipefail
-          TRIVY_VERSION="0.71.1"
-          TRIVY_SHA256="3cbae37cd440cd8676e5ce9207fe460b5641c7579a17e9d00f8894928c41a88d"
+          TRIVY_VERSION="0.71.2"
+          TRIVY_SHA256="0510e71e2fd39bf863856d499c8dc19feb4e7336546394c502a8f5cc7ab27460"
           curl -fsSL -o /tmp/trivy.tar.gz \
             "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
           echo "${TRIVY_SHA256}  /tmp/trivy.tar.gz" | sha256sum -c -
