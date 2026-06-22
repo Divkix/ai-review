@@ -872,8 +872,8 @@ jobs:
       - name: Install zizmor v1.25.2
         run: |
           set -euo pipefail
-          ZIZMOR_VERSION="v1.25.2"
-          ZIZMOR_SHA256="aa1facd105f0d83fe5c55b1adcd9d7417de5d83aa27471f91dc0b66cf3803577"
+          ZIZMOR_VERSION="v1.26.1"
+          ZIZMOR_SHA256="8556289a64e7aaf2400cd516f61a471aa91c5902cc56ad96a82fd12f90c2ef73"
           curl -fsSL -o /tmp/zizmor.tar.gz \
             "https://github.com/zizmorcore/zizmor/releases/download/${ZIZMOR_VERSION}/zizmor-x86_64-unknown-linux-gnu.tar.gz"
           echo "${ZIZMOR_SHA256}  /tmp/zizmor.tar.gz" | sha256sum -c -
