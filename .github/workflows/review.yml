@@ -1072,8 +1072,8 @@ jobs:
       - name: Install ast-grep (pinned)
         run: |
           set -euo pipefail
-          ASTGREP_VERSION="0.43.0"
-          ASTGREP_SHA256="a26253a9c821d935f7e383e40f0de7c2ca62a4121de1f73a6d81ec32eae631e0"
+          ASTGREP_VERSION="0.44.0"
+          ASTGREP_SHA256="a074982c59a749371d225e6129faf5815f731f460aa080c004af9b7e79c55632"
           curl -fsSL -o /tmp/ast-grep.zip \
             "https://github.com/ast-grep/ast-grep/releases/download/${ASTGREP_VERSION}/app-x86_64-unknown-linux-gnu.zip"
           echo "${ASTGREP_SHA256}  /tmp/ast-grep.zip" | sha256sum -c -
