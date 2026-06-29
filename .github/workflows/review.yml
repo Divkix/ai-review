@@ -1382,8 +1382,8 @@ jobs:
       - name: Install opencode (pinned)
         run: |
           set -euo pipefail
-          OPENCODE_VERSION="1.17.9"
-          OPENCODE_SHA256="85aeac95258d409d16ca34f1cfcd74c78d9d1a70b0a4154128b588e1405384f9"
+          OPENCODE_VERSION="1.17.11"
+          OPENCODE_SHA256="6aefcbbb7f04cdb4642be5208ddbfabb3c3d274f816bf42bff72eea5c244dca2"
           curl -fsSL -o /tmp/opencode.tar.gz \
             "https://github.com/anomalyco/opencode/releases/download/v${OPENCODE_VERSION}/opencode-linux-x64.tar.gz"
           echo "${OPENCODE_SHA256}  /tmp/opencode.tar.gz" | sha256sum -c -
